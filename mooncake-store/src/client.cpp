@@ -1,4 +1,6 @@
 #include "client.h"
+#include "gds/gds_interface.h"
+#include "gds/gds_mock.h"
 
 #include <glog/logging.h>
 
@@ -16,6 +18,8 @@
 #include "transport/transport.h"
 #include "config.h"
 #include "types.h"
+
+using namespace GDS;
 
 namespace mooncake {
 
@@ -450,7 +454,7 @@ tl::expected<void, ErrorCode> Client::Get(
     }
 
     auto t0_get = std::chrono::steady_clock::now();
-    err = TransferRead(replica, slices);
+    err = TransferRead(replica, object_key, slices);
     auto us_get = std::chrono::duration_cast<std::chrono::microseconds>(
                       std::chrono::steady_clock::now() - t0_get)
                       .count();
@@ -522,20 +526,47 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
             continue;
         }
 
-        // Submit transfer operation asynchronously
-        auto future = transfer_submitter_->submit(replica, slices_it->second,
-                                                  TransferRequest::READ);
-        if (!future) {
-            LOG(ERROR) << "Failed to submit transfer operation for key: "
-                       << key;
-            results[i] = tl::unexpected(ErrorCode::TRANSFER_FAIL);
-            continue;
+        // Check if it's a disk replica (which we now store in GDS)
+        if (replica.is_disk_replica()) {
+            // Read data directly from GDS
+            uint64_t blockId = objectKeyToUint64(key);
+            auto& disk_desc = replica.get_disk_descriptor();
+            size_t total_size = disk_desc.object_size;
+            
+            size_t slices_size = CalculateSliceSize(slices_it->second);
+            if (slices_size < total_size) {
+                LOG(ERROR) << "Slice size " << slices_size << " is smaller than total "
+                          << "size " << total_size;
+                results[i] = tl::unexpected(ErrorCode::INVALID_PARAMS);
+                continue;
+            }
+            
+            // Read data from GDS
+            int32_t gds_result = GDSMock::instance().get(blockId, static_cast<uint8_t*>(slices_it->second[0].ptr), 0, total_size);
+            if (gds_result != 0) {
+                LOG(ERROR) << "Failed to read data from GDS for key: " << key << ": " << gds_result;
+                results[i] = tl::unexpected(ErrorCode::TRANSFER_FAIL);
+                continue;
+            }
+            
+            VLOG(1) << "Successfully read data from GDS for key: " << key;
+            results[i] = {};
+        } else {
+            // Submit transfer operation asynchronously for memory replicas
+            auto future = transfer_submitter_->submit(replica, slices_it->second,
+                                                      TransferRequest::READ);
+            if (!future) {
+                LOG(ERROR) << "Failed to submit transfer operation for key: "
+                           << key;
+                results[i] = tl::unexpected(ErrorCode::TRANSFER_FAIL);
+                continue;
+            }
+
+            VLOG(1) << "Submitted transfer for key " << key
+                    << " using strategy: " << static_cast<int>(future->strategy());
+
+            pending_transfers.emplace_back(i, key, std::move(*future));
         }
-
-        VLOG(1) << "Submitted transfer for key " << key
-                << " using strategy: " << static_cast<int>(future->strategy());
-
-        pending_transfers.emplace_back(i, key, std::move(*future));
     }
 
     // Wait for all transfers to complete
@@ -593,9 +624,36 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
              it != start_result.value().rend(); ++it) {
             const auto& replica = *it;
             if (replica.is_disk_replica()) {
-                // Store to local file if storage backend is available
-                auto disk_descriptor = replica.get_disk_descriptor();
-                PutToLocalFile(key, slices, disk_descriptor);
+                // Store to GDS KV instead of local file
+                uint64_t blockId = objectKeyToUint64(key);
+                
+                // Calculate total size and copy data to a single buffer
+                size_t total_size = 0;
+                for (const auto& slice : slices) {
+                    total_size += slice.size;
+                }
+                
+                // Allocate buffer for combined data
+                std::vector<uint8_t> buffer(total_size);
+                size_t offset = 0;
+                for (const auto& slice : slices) {
+                    std::memcpy(buffer.data() + offset, slice.ptr, slice.size);
+                    offset += slice.size;
+                }
+                
+                // Write data to GDS
+                int32_t gds_result = GDSMock::instance().put(blockId, buffer.data(), 0, total_size);
+                if (gds_result != 0) {
+                    LOG(ERROR) << "Failed to write data to GDS: " << gds_result;
+                    // Revoke put operation
+                    auto revoke_result = master_client_.PutRevoke(key, ReplicaType::DISK);
+                    if (!revoke_result) {
+                        LOG(ERROR) << "Failed to revoke put operation for disk replica";
+                    }
+                    return tl::unexpected(ErrorCode::WRITE_FAIL);
+                }
+                
+                VLOG(1) << "Successfully wrote data to GDS for key: " << key;
                 break;  // Only one disk replica is needed
             }
         }
@@ -792,8 +850,32 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                  ++it) {
                 const auto& replica = *it;
                 if (replica.is_disk_replica()) {
-                    auto disk_descriptor = replica.get_disk_descriptor();
-                    PutToLocalFile(op.key, op.slices, disk_descriptor);
+                    // Store to GDS KV instead of local file
+                    uint64_t blockId = objectKeyToUint64(op.key);
+                    
+                    // Calculate total size and copy data to a single buffer
+                    size_t total_size = 0;
+                    for (const auto& slice : op.slices) {
+                        total_size += slice.size;
+                    }
+                    
+                    // Allocate buffer for combined data
+                    std::vector<uint8_t> buffer(total_size);
+                    size_t offset = 0;
+                    for (const auto& slice : op.slices) {
+                        std::memcpy(buffer.data() + offset, slice.ptr, slice.size);
+                        offset += slice.size;
+                    }
+                    
+                    // Write data to GDS
+                    int32_t gds_result = GDSMock::instance().put(blockId, buffer.data(), 0, total_size);
+                    if (gds_result != 0) {
+                        LOG(ERROR) << "Failed to write data to GDS for key " << op.key << ": " << gds_result;
+                        op.SetError(ErrorCode::WRITE_FAIL, "GDS put operation failed");
+                        return;
+                    }
+                    
+                    VLOG(1) << "Successfully wrote data to GDS for key: " << op.key;
                     break;  // Only one disk replica is needed
                 }
             }
@@ -1291,9 +1373,36 @@ ErrorCode Client::TransferWrite(const Replica::Descriptor& replica_descriptor,
     return TransferData(replica_descriptor, slices, TransferRequest::WRITE);
 }
 
-ErrorCode Client::TransferRead(const Replica::Descriptor& replica_descriptor,
-                               std::vector<Slice>& slices) {
+ErrorCode Client::TransferRead(const Replica::Descriptor& replica_descriptor, const std::string& object_key, std::vector<Slice>& slices) {
     size_t total_size = 0;
+    
+    // Check if it's a disk replica (which we now store in GDS)
+    if (replica_descriptor.is_disk_replica()) {
+        // This key was stored in GDS, so we need to retrieve it from there
+        uint64_t blockId = objectKeyToUint64(object_key);
+        
+        auto& disk_desc = replica_descriptor.get_disk_descriptor();
+        total_size = disk_desc.object_size;
+        
+        size_t slices_size = CalculateSliceSize(slices);
+        if (slices_size < total_size) {
+            LOG(ERROR) << "Slice size " << slices_size << " is smaller than total "
+                      << "size " << total_size;
+            return ErrorCode::INVALID_PARAMS;
+        }
+        
+        // Read data from GDS
+        int32_t gds_result = GDSMock::instance().get(blockId, static_cast<uint8_t*>(slices[0].ptr), 0, total_size);
+        if (gds_result != 0) {
+            LOG(ERROR) << "Failed to read data from GDS: " << gds_result;
+            return ErrorCode::TRANSFER_FAIL;
+        }
+        
+        VLOG(1) << "Successfully read data from GDS for key: " << object_key;
+        return ErrorCode::OK;
+    }
+    
+    // Handle memory replica as before
     if (replica_descriptor.is_memory_replica()) {
         auto& mem_desc = replica_descriptor.get_memory_descriptor();
         for (const auto& handle : mem_desc.buffer_descriptors) {

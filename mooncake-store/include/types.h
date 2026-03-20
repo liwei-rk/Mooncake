@@ -4,6 +4,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -51,6 +52,26 @@ using BufHandleList = std::vector<std::shared_ptr<AllocatedBuffer>>;
 using ReplicaList = std::unordered_map<uint32_t, Replica>;
 using BufferResources =
     std::map<SegmentId, std::vector<std::shared_ptr<BufferAllocatorBase>>>;
+
+/**
+ * @brief Convert ObjectKey to uint64_t using hash function
+ * @param key ObjectKey to convert
+ * @return uint64_t hash value of the key
+ */
+inline uint64_t objectKeyToUint64(const ObjectKey& key) {
+    return static_cast<uint64_t>(std::hash<ObjectKey>{}(key));
+}
+
+/**
+ * @brief Convert uint64_t to ObjectKey as hex string
+ * @param value uint64_t value to convert
+ * @return ObjectKey (string) representation of the value
+ */
+inline ObjectKey uint64ToObjectKey(uint64_t value) {
+    std::stringstream ss;
+    ss << std::hex << value;
+    return ss.str();
+}
 // Mapping between c++ and go types
 #ifdef STORE_USE_ETCD
 using EtcdRevisionId = GoInt64;

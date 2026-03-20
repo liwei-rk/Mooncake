@@ -258,6 +258,7 @@ class Client {
     ErrorCode TransferWrite(const Replica::Descriptor& replica,
                             std::vector<Slice>& slices);
     ErrorCode TransferRead(const Replica::Descriptor& replica,
+                           const std::string& object_key,
                            std::vector<Slice>& slices);
 
     /**
