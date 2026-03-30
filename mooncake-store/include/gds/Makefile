@@ -5,7 +5,7 @@ CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -fPIC
 INCLUDES = -I.
 
 # Target library
-TARGET = libgdsmock.a
+TARGET = libgdsmock.a 
 SHAREDTARGET = libgdsmock.so
 
 # Source files
@@ -19,7 +19,7 @@ TEST_OBJS = $(TEST_SRCS:.cpp=.o)
 
 .PHONY: all clean test install
 
-all: $(TARGET) $(SHAREDTARGET)
+all: $(TARGET) $(SHAREDTARGET) $(TEST_TARGET)
 
 # Static library
 $(TARGET): $(OBJS)

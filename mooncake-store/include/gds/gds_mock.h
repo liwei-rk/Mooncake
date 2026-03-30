@@ -31,9 +31,11 @@ private:
     GDSMock(const GDSMock&) = delete;
     GDSMock& operator=(const GDSMock&) = delete;
     
-    std::map<uint64_t, std::vector<uint8_t>> data_;
     mutable std::mutex mutex_;
     bool initialized_ = false;
+    
+    // Helper method to get filename from blockId
+    std::string getBlockFilename(uint64_t blockId) const;
 };
 
 } // namespace GDS
