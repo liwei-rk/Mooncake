@@ -162,4 +162,18 @@ target_link_libraries(serializer_test PUBLIC
 )
 add_test(NAME serializer_test COMMAND serializer_test)
 
+add_executable(client_gds_integration_test client_gds_integration_test.cpp)
+target_link_libraries(client_gds_integration_test PUBLIC
+    mooncake_store
+    cachelib_memory_allocator
+    ${ETCD_WRAPPER_LIB}
+    glog
+    gflags
+    gtest
+    gtest_main
+    pthread
+    -L${CMAKE_CURRENT_SOURCE_DIR}/../include/gds -lgdsmock
+)
+add_test(NAME client_gds_integration_test COMMAND client_gds_integration_test)
+
 add_subdirectory(e2e)
