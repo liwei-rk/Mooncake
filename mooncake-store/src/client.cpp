@@ -683,12 +683,22 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
         metrics_->transfer_metric.put_latency_us.observe(us_put);
     }
 
-    // End put operation
+    // End put operation for memory replicas
     auto end_result = master_client_.PutEnd(key, ReplicaType::MEMORY);
     if (!end_result) {
         ErrorCode err = end_result.error();
-        LOG(ERROR) << "Failed to end put operation: " << err;
+        LOG(ERROR) << "Failed to end put operation for memory replica: " << err;
         return tl::unexpected(err);
+    }
+
+    // End put operation for disk replica if storage backend is initialized
+    if (storage_backend_) {
+        auto disk_end_result = master_client_.PutEnd(key, ReplicaType::DISK);
+        if (!disk_end_result) {
+            ErrorCode err = disk_end_result.error();
+            LOG(ERROR) << "Failed to end put operation for disk replica: " << err;
+            // Continue even if disk end fails, as memory replica is already complete
+        }
     }
 
     return {};
@@ -846,6 +856,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
         // We must deal with disk replica first, then the disk putrevoke/putend
         // can be called surely
         if (storage_backend_) {
+            bool disk_replica_processed = false;
             for (auto it = op.replicas.rbegin(); it != op.replicas.rend();
                  ++it) {
                 const auto& replica = *it;
@@ -872,12 +883,18 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                     if (gds_result != 0) {
                         LOG(ERROR) << "Failed to write data to GDS for key " << op.key << ": " << gds_result;
                         op.SetError(ErrorCode::WRITE_FAIL, "GDS put operation failed");
-                        return;
+                        disk_replica_processed = true;
+                        break;
                     }
                     
                     VLOG(1) << "Successfully wrote data to GDS for key: " << op.key;
+                    disk_replica_processed = true;
                     break;  // Only one disk replica is needed
                 }
+            }
+            if (op.IsResolved()) {
+                // If disk replica processing failed, skip to next operation
+                continue;
             }
         }
 
@@ -1009,17 +1026,26 @@ void Client::FinalizeBatchPut(std::vector<PutOperation>& ops) {
             // Process individual responses
             for (size_t i = 0; i < end_responses.size(); ++i) {
                 const size_t op_idx = successful_indices[i];
+                const std::string& key = successful_keys[i];
                 if (!end_responses[i]) {
                     LOG(ERROR) << "Failed to finalize put for key "
-                               << successful_keys[i] << ": "
+                               << key << ": "
                                << toString(end_responses[i].error());
                     ops[op_idx].SetError(end_responses[i].error(),
                                          "BatchPutEnd failed");
                 } else {
+                    // Also finalize disk replica if storage backend is initialized
+                    if (storage_backend_) {
+                        auto disk_end_result = master_client_.PutEnd(key, ReplicaType::DISK);
+                        if (!disk_end_result) {
+                            LOG(ERROR) << "Failed to end put operation for disk replica: " << key;
+                            // Continue even if disk end fails, as memory replica is already complete
+                        }
+                    }
                     // Operation fully successful
                     ops[op_idx].SetSuccess();
                     VLOG(1) << "Successfully completed put for key "
-                            << successful_keys[i];
+                            << key;
                 }
             }
         }
@@ -1041,9 +1067,10 @@ void Client::FinalizeBatchPut(std::vector<PutOperation>& ops) {
             // Process individual revoke responses
             for (size_t i = 0; i < revoke_responses.size(); ++i) {
                 const size_t op_idx = failed_indices[i];
+                const std::string& key = failed_keys[i];
                 if (!revoke_responses[i]) {
                     LOG(ERROR)
-                        << "Failed to revoke put for key " << failed_keys[i]
+                        << "Failed to revoke put for key " << key
                         << ": " << toString(revoke_responses[i].error());
                     // Preserve original error but note revoke failure in
                     // context
@@ -1052,8 +1079,16 @@ void Client::FinalizeBatchPut(std::vector<PutOperation>& ops) {
                     ops[op_idx].failure_context =
                         original_context + "; revoke also failed";
                 } else {
+                    // Also revoke disk replica if storage backend is initialized
+                    if (storage_backend_) {
+                        auto disk_revoke_result = master_client_.PutRevoke(key, ReplicaType::DISK);
+                        if (!disk_revoke_result) {
+                            LOG(ERROR) << "Failed to revoke put operation for disk replica: " << key;
+                            // Continue even if disk revoke fails
+                        }
+                    }
                     LOG(INFO) << "Successfully revoked failed put for key "
-                              << failed_keys[i];
+                              << key;
                 }
             }
         }
