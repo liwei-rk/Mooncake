@@ -1228,6 +1228,12 @@ tl::expected<void, ErrorCode> Client::MountSegment(const void* buffer,
         return tl::unexpected(err);
     }
 
+    if (GDSMock::instance().init((void*)buffer, size)) {
+        LOG(ERROR) << "GDS init failed base=" << buffer
+                   << " size=" << size;
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+
     mounted_segments_[segment.id] = segment;
     return {};
 }
