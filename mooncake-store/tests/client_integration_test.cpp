@@ -295,13 +295,23 @@ TEST_F(ClientIntegrationTest, LocalPreferredAllocationTest) {
     ASSERT_TRUE(query_result.has_value())
         << "Query operation failed: " << toString(query_result.error());
     auto replica_list = query_result.value();
-    ASSERT_EQ(replica_list.size(), 1);
-    ASSERT_EQ(replica_list[0].get_memory_descriptor().buffer_descriptors.size(),
-              1);
-    ASSERT_EQ(replica_list[0]
-                  .get_memory_descriptor()
-                  .buffer_descriptors[0]
-                  .segment_name_,
+    // Count only memory replicas (disk replicas are added automatically when root_fs_dir is set)
+    size_t memory_replica_count = 0;
+    for (const auto& replica : replica_list) {
+        if (replica.is_memory_replica()) {
+            memory_replica_count++;
+        }
+    }
+    ASSERT_EQ(memory_replica_count, 1);
+    // Find the memory replica (disk replica might be first when root_fs_dir is set)
+    auto memory_replica_it = std::find_if(replica_list.begin(), replica_list.end(),
+                                         [](const Replica::Descriptor& replica) {
+                                             return replica.is_memory_replica();
+                                         });
+    ASSERT_NE(memory_replica_it, replica_list.end());
+    
+    ASSERT_EQ(memory_replica_it->get_memory_descriptor().buffer_descriptors.size(), 1);
+    ASSERT_EQ(memory_replica_it->get_memory_descriptor().buffer_descriptors[0].segment_name_,
               "localhost:17812");
 
     auto get_result = test_client_->Get(key, replica_list, slices);
