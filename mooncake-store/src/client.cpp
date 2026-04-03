@@ -856,7 +856,6 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
         // We must deal with disk replica first, then the disk putrevoke/putend
         // can be called surely
         if (storage_backend_) {
-            bool disk_replica_processed = false;
             for (auto it = op.replicas.rbegin(); it != op.replicas.rend();
                  ++it) {
                 const auto& replica = *it;
@@ -883,18 +882,12 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                     if (gds_result != 0) {
                         LOG(ERROR) << "Failed to write data to GDS for key " << op.key << ": " << gds_result;
                         op.SetError(ErrorCode::WRITE_FAIL, "GDS put operation failed");
-                        disk_replica_processed = true;
                         break;
                     }
                     
                     VLOG(1) << "Successfully wrote data to GDS for key: " << op.key;
-                    disk_replica_processed = true;
                     break;  // Only one disk replica is needed
                 }
-            }
-            if (op.IsResolved()) {
-                // If disk replica processing failed, skip to next operation
-                continue;
             }
         }
 
