@@ -7,12 +7,12 @@
 #include <string>
 #include <vector>
 
-namespace GDS {
+namespace NDS {
 
 // Mock data storage for testing
-class GDSMock {
+class NDSMock {
 public:
-    static GDSMock& instance();
+    static NDSMock& instance();
     
     // Mock implementations
     int32_t init(void* addr, uint64_t len);
@@ -26,10 +26,10 @@ public:
     bool hasBlock(uint64_t blockId) const;
     
 private:
-    GDSMock() = default;
-    ~GDSMock() = default;
-    GDSMock(const GDSMock&) = delete;
-    GDSMock& operator=(const GDSMock&) = delete;
+    NDSMock() = default;
+    ~NDSMock() = default;
+    NDSMock(const NDSMock&) = delete;
+    NDSMock& operator=(const NDSMock&) = delete;
     
     mutable std::mutex mutex_;
     bool initialized_ = false;
@@ -38,4 +38,4 @@ private:
     std::string getBlockFilename(uint64_t blockId) const;
 };
 
-} // namespace GDS
+} // namespace NDS

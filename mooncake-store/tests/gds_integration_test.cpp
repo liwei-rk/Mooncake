@@ -14,8 +14,8 @@ class GdsIntegrationTest : public ::testing::Test {
 protected:
     void SetUp() override {
         // Initialize GDS
-        int32_t result = GDS::init(nullptr, 0);
-        EXPECT_EQ(result, 0) << "Failed to initialize GDS";
+        int32_t result = NDS::init(nullptr, 0);
+        EXPECT_EQ(result, 0) << "Failed to initialize NDS";
         
         // Create client
         std::string local_hostname = "127.0.0.1:8080";
@@ -36,7 +36,7 @@ protected:
 // Test normal put-get operation
 TEST_F(GdsIntegrationTest, NormalPutGet) {
     std::string key = "test_key_123";
-    std::string value = "Hello, GDS!";
+    std::string value = "Hello, NDS!";
     
     // Create slice with data
     std::vector<Slice> slices;

@@ -5,23 +5,23 @@
 #include <filesystem>
 #include <iostream>
 
-namespace GDS {
+namespace NDS {
 
 namespace fs = std::filesystem;
 
-GDSMock& GDSMock::instance() {
-    static GDSMock instance;
+NDSMock& NDSMock::instance() {
+    static NDSMock instance;
     return instance;
 }
 
-int32_t GDSMock::init(void* addr, uint64_t len) {
+int32_t NDSMock::init(void* addr, uint64_t len) {
     std::lock_guard<std::mutex> lock(mutex_);
     initialized_ = true;
     std::cout << "DEBUG: GDS initialized" << std::endl;
     return 0;  // Success
 }
 
-std::string GDSMock::getBlockFilename(uint64_t blockId) const {
+std::string NDSMock::getBlockFilename(uint64_t blockId) const {
     // Create kv_data directory if it doesn't exist
     fs::path kv_dir = fs::current_path() / "kv_data";
     if (!fs::exists(kv_dir)) {
@@ -35,7 +35,7 @@ std::string GDSMock::getBlockFilename(uint64_t blockId) const {
     return full_path.string();
 }
 
-int32_t GDSMock::isExists(std::vector<uint64_t> blockIds) {
+int32_t NDSMock::isExists(std::vector<uint64_t> blockIds) {
     std::lock_guard<std::mutex> lock(mutex_);
     
     if (!initialized_) {
@@ -57,7 +57,7 @@ int32_t GDSMock::isExists(std::vector<uint64_t> blockIds) {
     return count;
 }
 
-int32_t GDSMock::get(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len) {
+int32_t NDSMock::get(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len) {
     std::lock_guard<std::mutex> lock(mutex_);
     
     if (!initialized_) {
@@ -115,7 +115,7 @@ int32_t GDSMock::get(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t
     return 0;  // Success
 }
 
-int32_t GDSMock::put(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len) {
+int32_t NDSMock::put(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len) {
     std::lock_guard<std::mutex> lock(mutex_);
     
     if (!initialized_) {
@@ -184,7 +184,7 @@ int32_t GDSMock::put(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t
     return 0;  // Success
 }
 
-void GDSMock::clear() {
+void NDSMock::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     
     std::cout << "DEBUG: Clearing all GDS files" << std::endl;
@@ -213,7 +213,7 @@ void GDSMock::clear() {
     std::cout << "DEBUG: Clear completed" << std::endl;
 }
 
-size_t GDSMock::size() const {
+size_t NDSMock::size() const {
     std::lock_guard<std::mutex> lock(mutex_);
     
     size_t count = 0;
@@ -237,7 +237,7 @@ size_t GDSMock::size() const {
     return count;
 }
 
-bool GDSMock::hasBlock(uint64_t blockId) const {
+bool NDSMock::hasBlock(uint64_t blockId) const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::string filename = getBlockFilename(blockId);
     bool exists = fs::exists(filename);
@@ -248,23 +248,23 @@ bool GDSMock::hasBlock(uint64_t blockId) const {
 // C interface functions for linking
 extern "C" {
 
-int32_t GDS_init(void* addr, uint64_t len) {
-    return GDSMock::instance().init(addr, len);
+int32_t NDS_init(void* addr, uint64_t len) {
+    return NDSMock::instance().init(addr, len);
 }
 
-int32_t GDS_isExists(uint64_t* blockIds, int32_t count) {
+int32_t NDS_isExists(uint64_t* blockIds, int32_t count) {
     std::vector<uint64_t> ids(blockIds, blockIds + count);
-    return GDSMock::instance().isExists(ids);
+    return NDSMock::instance().isExists(ids);
 }
 
-int32_t GDS_get(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len) {
-    return GDSMock::instance().get(blockId, blockAddr, offset, len);
+int32_t NDS_get(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len) {
+    return NDSMock::instance().get(blockId, blockAddr, offset, len);
 }
 
-int32_t GDS_put(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len) {
-    return GDSMock::instance().put(blockId, blockAddr, offset, len);
+int32_t NDS_put(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len) {
+    return NDSMock::instance().put(blockId, blockAddr, offset, len);
 }
 
 } // extern "C"
 
-} // namespace GDS
+} // namespace NDS

@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <vector>
 
-namespace GDS {
+namespace NDS {
     /**
      * @brief Initialize GDS KV storage
      * @param addr Memory address for initialization

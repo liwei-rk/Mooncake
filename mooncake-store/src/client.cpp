@@ -19,7 +19,7 @@
 #include "config.h"
 #include "types.h"
 
-using namespace GDS;
+using namespace NDS;
 
 namespace mooncake {
 
@@ -542,7 +542,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
             }
             
             // Read data from GDS
-            int32_t gds_result = GDSMock::instance().get(blockId, static_cast<uint8_t*>(slices_it->second[0].ptr), 0, total_size);
+            int32_t gds_result = NDSMock::instance().get(blockId, static_cast<uint8_t*>(slices_it->second[0].ptr), 0, total_size);
             if (gds_result != 0) {
                 LOG(ERROR) << "Failed to read data from GDS for key: " << key << ": " << gds_result;
                 results[i] = tl::unexpected(ErrorCode::TRANSFER_FAIL);
@@ -642,7 +642,7 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
                 }
                 
                 // Write data to GDS
-                int32_t gds_result = GDSMock::instance().put(blockId, buffer.data(), 0, total_size);
+                int32_t gds_result = NDSMock::instance().put(blockId, buffer.data(), 0, total_size);
                 if (gds_result != 0) {
                     LOG(ERROR) << "Failed to write data to GDS: " << gds_result;
                     // Revoke put operation
@@ -878,7 +878,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                     }
                     
                     // Write data to GDS
-                    int32_t gds_result = GDSMock::instance().put(blockId, buffer.data(), 0, total_size);
+                    int32_t gds_result = NDSMock::instance().put(blockId, buffer.data(), 0, total_size);
                     if (gds_result != 0) {
                         LOG(ERROR) << "Failed to write data to GDS for key " << op.key << ": " << gds_result;
                         op.SetError(ErrorCode::WRITE_FAIL, "GDS put operation failed");
@@ -1221,7 +1221,7 @@ tl::expected<void, ErrorCode> Client::MountSegment(const void* buffer,
         return tl::unexpected(err);
     }
 
-    if (GDSMock::instance().init((void*)buffer, size)) {
+    if (NDSMock::instance().init((void*)buffer, size)) {
         LOG(ERROR) << "GDS init failed base=" << buffer
                    << " size=" << size;
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
@@ -1426,7 +1426,7 @@ ErrorCode Client::TransferRead(const Replica::Descriptor& replica_descriptor, co
         }
         
         // Read data from GDS
-        int32_t gds_result = GDSMock::instance().get(blockId, static_cast<uint8_t*>(slices[0].ptr), 0, total_size);
+        int32_t gds_result = NDSMock::instance().get(blockId, static_cast<uint8_t*>(slices[0].ptr), 0, total_size);
         if (gds_result != 0) {
             LOG(ERROR) << "Failed to read data from GDS: " << gds_result;
             return ErrorCode::TRANSFER_FAIL;
