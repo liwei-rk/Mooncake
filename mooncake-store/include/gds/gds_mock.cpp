@@ -1,27 +1,21 @@
-#include "gds_mock.h"
+#include "gds_interface.h"
 #include <cstring>
 #include <algorithm>
 #include <fstream>
 #include <filesystem>
 #include <iostream>
+#include <mutex>
 
 namespace NDS {
 
 namespace fs = std::filesystem;
 
-NDSMock& NDSMock::instance() {
-    static NDSMock instance;
-    return instance;
-}
+// Global variables
+std::mutex g_mutex;
+bool g_initialized = false;
 
-int32_t NDSMock::init(void* addr, uint64_t len) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    initialized_ = true;
-    std::cout << "DEBUG: GDS initialized" << std::endl;
-    return 0;  // Success
-}
-
-std::string NDSMock::getBlockFilename(uint64_t blockId) const {
+// Helper method to get filename from blockId
+std::string getBlockFilename(uint64_t blockId) {
     // Create kv_data directory if it doesn't exist
     fs::path kv_dir = fs::current_path() / "kv_data";
     if (!fs::exists(kv_dir)) {
@@ -35,10 +29,17 @@ std::string NDSMock::getBlockFilename(uint64_t blockId) const {
     return full_path.string();
 }
 
-int32_t NDSMock::isExists(std::vector<uint64_t> blockIds) {
-    std::lock_guard<std::mutex> lock(mutex_);
+int32_t init(void* addr, uint64_t len) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_initialized = true;
+    std::cout << "DEBUG: GDS initialized" << std::endl;
+    return 0;  // Success
+}
+
+int32_t isExists(std::vector<uint64_t> blockIds) {
+    std::lock_guard<std::mutex> lock(g_mutex);
     
-    if (!initialized_) {
+    if (!g_initialized) {
         std::cout << "DEBUG: GDS not initialized" << std::endl;
         return -1;  // Not initialized
     }
@@ -57,10 +58,10 @@ int32_t NDSMock::isExists(std::vector<uint64_t> blockIds) {
     return count;
 }
 
-int32_t NDSMock::get(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len) {
-    std::lock_guard<std::mutex> lock(mutex_);
+int32_t get(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len) {
+    std::lock_guard<std::mutex> lock(g_mutex);
     
-    if (!initialized_) {
+    if (!g_initialized) {
         std::cout << "DEBUG: GDS not initialized" << std::endl;
         return -1;  // Not initialized
     }
@@ -115,10 +116,10 @@ int32_t NDSMock::get(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t
     return 0;  // Success
 }
 
-int32_t NDSMock::put(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len) {
-    std::lock_guard<std::mutex> lock(mutex_);
+int32_t put(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len) {
+    std::lock_guard<std::mutex> lock(g_mutex);
     
-    if (!initialized_) {
+    if (!g_initialized) {
         std::cout << "DEBUG: GDS not initialized" << std::endl;
         return -1;  // Not initialized
     }
@@ -184,8 +185,9 @@ int32_t NDSMock::put(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t
     return 0;  // Success
 }
 
-void NDSMock::clear() {
-    std::lock_guard<std::mutex> lock(mutex_);
+// Helper methods for testing
+void clear() {
+    std::lock_guard<std::mutex> lock(g_mutex);
     
     std::cout << "DEBUG: Clearing all GDS files" << std::endl;
     
@@ -213,8 +215,8 @@ void NDSMock::clear() {
     std::cout << "DEBUG: Clear completed" << std::endl;
 }
 
-size_t NDSMock::size() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+size_t size() {
+    std::lock_guard<std::mutex> lock(g_mutex);
     
     size_t count = 0;
     // Check if kv_data directory exists
@@ -237,8 +239,8 @@ size_t NDSMock::size() const {
     return count;
 }
 
-bool NDSMock::hasBlock(uint64_t blockId) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+bool hasBlock(uint64_t blockId) {
+    std::lock_guard<std::mutex> lock(g_mutex);
     std::string filename = getBlockFilename(blockId);
     bool exists = fs::exists(filename);
     std::cout << "DEBUG: Block ID " << blockId << " exists: " << (exists ? "YES" : "NO") << std::endl;
@@ -249,20 +251,20 @@ bool NDSMock::hasBlock(uint64_t blockId) const {
 extern "C" {
 
 int32_t NDS_init(void* addr, uint64_t len) {
-    return NDSMock::instance().init(addr, len);
+    return NDS::init(addr, len);
 }
 
 int32_t NDS_isExists(uint64_t* blockIds, int32_t count) {
     std::vector<uint64_t> ids(blockIds, blockIds + count);
-    return NDSMock::instance().isExists(ids);
+    return NDS::isExists(ids);
 }
 
 int32_t NDS_get(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len) {
-    return NDSMock::instance().get(blockId, blockAddr, offset, len);
+    return NDS::get(blockId, blockAddr, offset, len);
 }
 
 int32_t NDS_put(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len) {
-    return NDSMock::instance().put(blockId, blockAddr, offset, len);
+    return NDS::put(blockId, blockAddr, offset, len);
 }
 
 } // extern "C"
