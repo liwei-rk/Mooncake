@@ -172,7 +172,7 @@ target_link_libraries(client_gds_integration_test PUBLIC
     gtest
     gtest_main
     pthread
-    -L${CMAKE_CURRENT_SOURCE_DIR}/../include/gds -lgdsmock
+    -L${CMAKE_CURRENT_SOURCE_DIR}/../include/gds -lndsclient
 )
 add_test(NAME client_gds_integration_test COMMAND client_gds_integration_test)
 

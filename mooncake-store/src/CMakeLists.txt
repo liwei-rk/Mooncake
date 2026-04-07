@@ -42,7 +42,7 @@ endif()
 include_directories(${Python3_INCLUDE_DIRS})
 add_library(mooncake_store ${MOONCAKE_STORE_SOURCES})
 target_link_libraries(mooncake_store PUBLIC transfer_engine cachelib_memory_allocator ${ETCD_WRAPPER_LIB} glog::glog gflags::gflags  
-    gdsmock
+    ndsclient
     ${EXTRA_LIBS}
 )
 if (STORE_USE_ETCD)

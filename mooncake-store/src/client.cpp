@@ -1,6 +1,5 @@
 #include "client.h"
 #include "gds/gds_interface.h"
-#include "gds/gds_mock.h"
 
 #include <glog/logging.h>
 

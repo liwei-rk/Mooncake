@@ -5,8 +5,8 @@ CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -fPIC
 INCLUDES = -I.
 
 # Target library
-TARGET = libgdsmock.a 
-SHAREDTARGET = libgdsmock.so
+TARGET = libndsclient.a 
+SHAREDTARGET = libndsclient.so
 
 # Source files
 SRCS = gds_mock.cpp
@@ -34,8 +34,8 @@ $(SHAREDTARGET): $(OBJS)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 # Test executable
-$(TEST_TARGET): $(TEST_OBJS) $(TARGET)
-	$(CXX) -o $@ $(TEST_OBJS) -L. -lgdsmock $(CXXFLAGS)
+$(TEST_TARGET): $(TEST_OBJS) $(TARGET) gds_mock_test_utils.o
+	$(CXX) -o $@ $(TEST_OBJS) gds_mock_test_utils.o -L. -lndsclient $(CXXFLAGS)
 
 test: $(TEST_TARGET)
 	LD_LIBRARY_PATH=.:$LD_LIBRARY_PATH ./$(TEST_TARGET) 
@@ -53,5 +53,5 @@ clean:
 	rm -f $(OBJS) $(TEST_OBJS) $(TARGET) $(SHAREDTARGET) $(TEST_TARGET)
 
 # Dependencies
-gds_mock.o: gds_mock.h gds_interface.h
-test_gds_mock.o: gds_mock.h gds_interface.h
+gds_mock.o: gds_interface.h
+test_gds_mock.o: gds_mock_test_utils.h gds_interface.h
