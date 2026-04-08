@@ -1,4 +1,4 @@
-#include "gds_interface.h"
+#include "nds_interface.h"
 #include <cstring>
 #include <algorithm>
 #include <fstream>
@@ -10,18 +10,18 @@ namespace NDS {
 
 namespace fs = std::filesystem;
 
-// Global variables from gds_mock.cpp
+// Global variables from nds_mock.cpp
 extern std::mutex g_mutex;
 extern bool g_initialized;
 
-// Helper method from gds_mock.cpp
+// Helper method from nds_mock.cpp
 extern std::string getBlockFilename(uint64_t blockId);
 
 // Helper methods for testing
 void clear() {
     std::lock_guard<std::mutex> lock(g_mutex);
     
-    std::cout << "DEBUG: Clearing all GDS files" << std::endl;
+    std::cout << "DEBUG: Clearing all NDS files" << std::endl;
     
     // Check if kv_data directory exists
     fs::path kv_dir = fs::current_path() / "kv_data";
@@ -67,7 +67,7 @@ size_t size() {
             }
         }
     }
-    std::cout << "DEBUG: Current GDS file count: " << count << std::endl;
+    std::cout << "DEBUG: Current NDS file count: " << count << std::endl;
     return count;
 }
 

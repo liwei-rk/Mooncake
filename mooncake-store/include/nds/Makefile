@@ -1,4 +1,4 @@
-# Makefile for GDS Mock Library
+# Makefile for NDS Mock Library
 
 CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -fPIC
@@ -9,12 +9,12 @@ TARGET = libndsclient.a
 SHAREDTARGET = libndsclient.so
 
 # Source files
-SRCS = gds_mock.cpp
+SRCS = nds_mock.cpp
 OBJS = $(SRCS:.cpp=.o)
 
 # Test executable
-TEST_TARGET = test_gds_mock
-TEST_SRCS = test_gds_mock.cpp
+TEST_TARGET = test_nds_mock
+TEST_SRCS = test_nds_mock.cpp
 TEST_OBJS = $(TEST_SRCS:.cpp=.o)
 
 .PHONY: all clean test install
@@ -34,24 +34,24 @@ $(SHAREDTARGET): $(OBJS)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 # Test executable
-$(TEST_TARGET): $(TEST_OBJS) $(TARGET) gds_mock_test_utils.o
-	$(CXX) -o $@ $(TEST_OBJS) gds_mock_test_utils.o -L. -lndsclient $(CXXFLAGS)
+$(TEST_TARGET): $(TEST_OBJS) $(TARGET) nds_mock_test_utils.o
+	$(CXX) -o $@ $(TEST_OBJS) nds_mock_test_utils.o -L. -lndsclient $(CXXFLAGS)
 
 test: $(TEST_TARGET)
 	LD_LIBRARY_PATH=.:$LD_LIBRARY_PATH ./$(TEST_TARGET) 
 
 install: $(TARGET) $(SHAREDTARGET)
-	@echo "Installing GDS mock library..."
+	@echo "Installing NDS mock library..."
 	@mkdir -p $(DESTDIR)/usr/local/lib
-	@mkdir -p $(DESTDIR)/usr/local/include/gds
+	@mkdir -p $(DESTDIR)/usr/local/include/nds
 	cp $(TARGET) $(DESTDIR)/usr/local/lib/
 	cp $(SHAREDTARGET) $(DESTDIR)/usr/local/lib/
-	cp gds_mock.h gds_interface.h $(DESTDIR)/usr/local/include/gds/
+	cp nds_mock.h nds_interface.h $(DESTDIR)/usr/local/include/nds/
 	@echo "Installation complete."
 
 clean:
-	rm -f $(OBJS) $(TEST_OBJS) $(TARGET) $(SHAREDTARGET) $(TEST_TARGET)
+	rm -f $(OBJS) $(TEST_OBJS) nds_mock_test_utils.o $(TARGET) $(SHAREDTARGET) $(TEST_TARGET)
 
 # Dependencies
-gds_mock.o: gds_interface.h
-test_gds_mock.o: gds_mock_test_utils.h gds_interface.h
+nds_mock.o: nds_interface.h
+test_nds_mock.o: nds_mock_test_utils.h nds_interface.h

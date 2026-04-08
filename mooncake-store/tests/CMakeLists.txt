@@ -172,8 +172,8 @@ target_link_libraries(client_gds_integration_test PUBLIC
     gtest
     gtest_main
     pthread
-    -L${CMAKE_CURRENT_SOURCE_DIR}/../include/gds -lndsclient
+    -L${CMAKE_CURRENT_SOURCE_DIR}/../include/nds -lndsclient
 )
-add_test(NAME client_gds_integration_test COMMAND client_gds_integration_test)
+add_test(NAME client_nds_integration_test COMMAND client_gds_integration_test)
 
 add_subdirectory(e2e)

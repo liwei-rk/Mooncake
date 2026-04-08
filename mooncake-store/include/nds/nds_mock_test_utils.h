@@ -1,6 +1,6 @@
 #pragma once
 
-#include "gds_interface.h"
+#include "nds_interface.h"
 
 namespace NDS {
 

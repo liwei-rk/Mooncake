@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "client.h"
-#include "gds/gds_interface.h"
+#include "nds/nds_interface.h"
 #include "types.h"
 
 using namespace mooncake;

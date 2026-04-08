@@ -1,4 +1,4 @@
-#include "gds_interface.h"
+#include "nds_interface.h"
 #include <cstring>
 #include <algorithm>
 #include <fstream>
@@ -32,7 +32,7 @@ std::string getBlockFilename(uint64_t blockId) {
 int32_t init(void* addr, uint64_t len) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_initialized = true;
-    std::cout << "DEBUG: GDS initialized" << std::endl;
+    std::cout << "DEBUG: NDS initialized" << std::endl;
     return 0;  // Success
 }
 
@@ -40,7 +40,7 @@ int32_t isExists(std::vector<uint64_t> blockIds) {
     std::lock_guard<std::mutex> lock(g_mutex);
     
     if (!g_initialized) {
-        std::cout << "DEBUG: GDS not initialized" << std::endl;
+        std::cout << "DEBUG: NDS not initialized" << std::endl;
         return -1;  // Not initialized
     }
     
@@ -62,7 +62,7 @@ int32_t get(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len) {
     std::lock_guard<std::mutex> lock(g_mutex);
     
     if (!g_initialized) {
-        std::cout << "DEBUG: GDS not initialized" << std::endl;
+        std::cout << "DEBUG: NDS not initialized" << std::endl;
         return -1;  // Not initialized
     }
     
@@ -120,7 +120,7 @@ int32_t put(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len) {
     std::lock_guard<std::mutex> lock(g_mutex);
     
     if (!g_initialized) {
-        std::cout << "DEBUG: GDS not initialized" << std::endl;
+        std::cout << "DEBUG: NDS not initialized" << std::endl;
         return -1;  // Not initialized
     }
     
