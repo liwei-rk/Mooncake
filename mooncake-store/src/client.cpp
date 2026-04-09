@@ -1226,6 +1226,8 @@ tl::expected<void, ErrorCode> Client::MountSegment(const void* buffer,
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
 
+    LOG(INFO) << "GDS init success! ";
+
     mounted_segments_[segment.id] = segment;
     return {};
 }
