@@ -18,6 +18,7 @@
 #include "transfer_task.h"
 #include "types.h"
 #include "replica.h"
+#include "client_buffer.hpp"
 
 namespace mooncake {
 
@@ -128,7 +129,8 @@ class Client {
      */
     tl::expected<void, ErrorCode> Put(const ObjectKey& key,
                                       std::vector<Slice>& slices,
-                                      const ReplicateConfig& config);
+                                      const ReplicateConfig& config,
+                                      std::optional<BufferHandle> buffer_handle = std::nullopt);
 
     /**
      * @brief Batch put data with replication
@@ -258,7 +260,6 @@ class Client {
     ErrorCode TransferWrite(const Replica::Descriptor& replica,
                             std::vector<Slice>& slices);
     ErrorCode TransferRead(const Replica::Descriptor& replica,
-                           const std::string& object_key,
                            std::vector<Slice>& slices);
 
     /**
@@ -269,7 +270,8 @@ class Client {
 
     void PutToLocalFile(const std::string& object_key,
                         const std::vector<Slice>& slices,
-                        const DiskDescriptor& disk_descriptor);
+                        const DiskDescriptor& disk_descriptor,
+                        std::optional<BufferHandle> buffer_handle = std::nullopt);
 
     /**
      * @brief Find the first complete replica from a replica list

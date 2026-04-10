@@ -236,12 +236,12 @@ tl::expected<void, ErrorCode> PyClient::put_internal(
                    << key << ", value size: " << value.size();
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
-    auto &buffer_handle = *alloc_result;
+    auto buffer_handle = std::move(*alloc_result);
     memcpy(buffer_handle.ptr(), value.data(), value.size_bytes());
 
     std::vector<Slice> slices = split_into_slices(buffer_handle);
 
-    auto put_result = client_->Put(key, slices, config);
+    auto put_result = client_->Put(key, slices, config, std::move(buffer_handle));
     if (!put_result) {
         LOG(ERROR) << "Put operation failed with error: "
                    << toString(put_result.error());
@@ -349,7 +349,7 @@ tl::expected<void, ErrorCode> PyClient::put_parts_internal(
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
 
-    auto &buffer_handle = *alloc_result;
+    auto buffer_handle = std::move(*alloc_result);
 
     // Copy all parts into the contiguous buffer
     size_t offset = 0;
@@ -363,7 +363,7 @@ tl::expected<void, ErrorCode> PyClient::put_parts_internal(
     std::vector<Slice> slices = split_into_slices(buffer_handle);
 
     // Perform the put operation - buffer_handle will be automatically released
-    auto put_result = client_->Put(key, slices, config);
+    auto put_result = client_->Put(key, slices, config, std::move(buffer_handle));
     if (!put_result) {
         LOG(ERROR) << "Put operation failed with error: "
                    << toString(put_result.error());
@@ -820,7 +820,8 @@ tl::expected<void, ErrorCode> PyClient::put_from_internal(
         offset += chunk_size;
     }
 
-    auto put_result = client_->Put(key, slices, config);
+    // No buffer handle to manage in this case (using user-provided buffer)
+    auto put_result = client_->Put(key, slices, config, std::nullopt);
     if (!put_result) {
         LOG(ERROR) << "Put operation failed with error: "
                    << toString(put_result.error());
@@ -1085,7 +1086,8 @@ int PyClient::put_from_with_metadata(const std::string &key, void *buffer,
         slices.emplace_back(Slice{chunk_ptr, chunk_size});
         offset += chunk_size;
     }
-    auto put_result = client_->Put(key, slices, config);
+    // No buffer handle to manage in this case (using user-provided buffers)
+    auto put_result = client_->Put(key, slices, config, std::nullopt);
     if (!put_result) {
         LOG(ERROR) << "Put operation failed with error: "
                    << toString(put_result.error());

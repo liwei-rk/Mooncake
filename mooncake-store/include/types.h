@@ -8,6 +8,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <filesystem>
 
 #include "Slab.h"
 #include "ylt/struct_json/json_reader.h"
@@ -72,6 +73,21 @@ inline ObjectKey uint64ToObjectKey(uint64_t value) {
     ss << std::hex << value;
     return ss.str();
 }
+
+/**
+ * @brief Extract key from a full file path
+ * @param full_path Full file path in the format root_fs_dir/cluster_id/xx/xx/key
+ * @return ObjectKey extracted from the path (ignores SanitizeKey)
+ */
+inline ObjectKey ExtractKeyFromPath(const std::string& full_path) {
+    namespace fs = std::filesystem;
+    fs::path path(full_path);
+    
+    // The key is the filename (last component)
+    return path.filename().string();
+}
+
+
 // Mapping between c++ and go types
 #ifdef STORE_USE_ETCD
 using EtcdRevisionId = GoInt64;
