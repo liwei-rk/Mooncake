@@ -18,27 +18,27 @@ tl::expected<void, ErrorCode> StorageBackend::StoreObject(
     uint64_t blockId = objectKeyToUint64(key);
                 
      // Calculate total size and copy data to a single buffer
-                size_t total_size = 0;
-                for (const auto& slice : slices) {
-                    total_size += slice.size;
-                }
-                
-                // Allocate buffer for combined data
-                std::vector<uint8_t> buffer(total_size);
-                size_t offset = 0;
-                for (const auto& slice : slices) {
-                    std::memcpy(buffer.data() + offset, slice.ptr, slice.size);
-                    offset += slice.size;
-                }
-                
-                // Write data to GDS
-                int32_t gds_result = NDS::put(blockId, buffer.data(), 0, total_size);
-                if (gds_result != 0) {
-                    LOG(ERROR) << "Failed to write data to GDS: " << gds_result;                
-                    return tl::unexpected(ErrorCode::WRITE_FAIL);
-                }
-                
-                VLOG(0) << "Successfully wrote data to GDS for key: " << key;
+    size_t total_size = 0;
+    for (const auto& slice : slices) {
+        total_size += slice.size;
+    }
+    
+    // Allocate buffer for combined data
+    std::vector<uint8_t> buffer(total_size);
+    size_t offset = 0;
+    for (const auto& slice : slices) {
+        std::memcpy(buffer.data() + offset, slice.ptr, slice.size);
+        offset += slice.size;
+    }
+    
+    // Write data to GDS
+    int32_t gds_result = NDS::put(blockId, buffer.data(), 0, total_size);
+    if (gds_result != 0) {
+        LOG(ERROR) << "Failed to write data to GDS: " << gds_result;                
+        return tl::unexpected(ErrorCode::WRITE_FAIL);
+    }
+    
+    VLOG(0) << "Successfully wrote data to GDS for key: " << key;
     return {};
 }
 
