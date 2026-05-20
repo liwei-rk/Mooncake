@@ -923,7 +923,6 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
             continue;
         }
 
-        // Find the first complete replica for this key
         Replica::Descriptor replica;
         ErrorCode err =
             FindFirstCompleteReplica(query_result.replicas, replica);
@@ -943,11 +942,9 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
             }
         }
 
-        // Submit transfer operation asynchronously
         auto future = transfer_submitter_->submit(replica, slices_it->second,
                                                   TransferRequest::READ);
         if (!future) {
-            // Release cache block if submit failed
             if (hot_cache_ && cache_used) {
                 hot_cache_->ReleaseHotKey(key);
             }
@@ -2115,7 +2112,6 @@ tl::expected<void, ErrorCode> Client::MarkTaskToComplete(
 void Client::PrepareStorageBackend(const std::string& storage_root_dir,
                                    const std::string& fsdir,
                                    bool enable_eviction, uint64_t quota_bytes) {
-    // Initialize storage backend
     storage_backend_ =
         StorageBackend::Create(storage_root_dir, fsdir, enable_eviction);
     if (!storage_backend_) {

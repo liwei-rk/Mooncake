@@ -11,16 +11,21 @@
 #include <string>
 #include <vector>
 
+#ifdef __linux__
+#include <dlfcn.h>
+#endif
+
 #include "file_interface.h"
 #include "mutex.h"
 #include "offset_allocator/offset_allocator.hpp"
 #include "types.h"
 
 namespace mooncake {
+
 struct FileRecord {
     std::string path;
     uint64_t size;
-    std::string key;  // Associated object key for eviction tracking
+    std::string key;
 };
 
 struct BucketObjectMetadata {
@@ -363,14 +368,10 @@ class StorageBackend {
     /**
      * @brief Initializes the storage backend.
      *
-     * This method scans the storage directory to build its internal state.
+     * Loads libndskv.so from root directory and initializes NDS KV storage.
      *
      * Idempotency: This method is idempotent; calling it multiple times has the
      * same effect as calling it once.
-     *
-     * Existing files: If there are existing files in the storage directory,
-     * they will be scanned and incorporated into the internal state. No files
-     * are deleted or overwritten during initialization.
      *
      * Thread-safety: This method is not thread-safe and should not be called
      * concurrently from multiple threads. It is recommended to call Init() from
@@ -379,10 +380,10 @@ class StorageBackend {
      * Initialization requirement: Init() must be called after construction and
      * before any other operations. Using other methods before successful
      * initialization may result in undefined behavior.
-     * @param quota_bytes Quota for the storage backend
+     * @param quota_bytes Quota for the storage backend (default 1GB if 0)
      * @return tl::expected<void, ErrorCode> indicating operation status.
      */
-    tl::expected<void, ErrorCode> Init(uint64_t quota_bytes);
+    tl::expected<void, ErrorCode> Init(uint64_t quota_bytes = 0);
 
     /**
      * @brief Evict files for satisfying quota limitation
@@ -455,6 +456,19 @@ class StorageBackend {
      */
     tl::expected<void, ErrorCode> LoadObject(const std::string& path,
                                              std::string& str, int64_t length);
+
+    /**
+     * @brief Batch-loads multiple objects using NDS::batchGet for efficient
+     * NVMe reads.
+     * @param keys Vector of object keys (one per object)
+     * @param batched_slices Vector of slice vectors (one per object)
+     * @return tl::expected<void, ErrorCode> indicating operation status.
+     *         On success, all objects were loaded.
+     *         On failure, no objects were loaded (all-or-nothing for NDS).
+     */
+    tl::expected<void, ErrorCode> LoadObjects(
+        const std::vector<std::string>& keys,
+        const std::vector<std::vector<Slice>>& batched_slices);
 
     /**
      * @brief Deletes the physical file associated with the given object key

@@ -524,6 +524,7 @@ class Client {
         const std::vector<std::string>& keys,
         const std::vector<std::vector<Slice>>& batched_slices,
         const std::vector<DiskDescriptor>& disk_descriptors);
+
     /**
      * @brief Initialize local hot cache
      * @return ErrorCode::OK if use local hot cache,

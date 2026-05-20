@@ -1,6 +1,4 @@
 #include "storage_backend.h"
-#include "nds/nds_interface.h"
-
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -17,6 +15,10 @@
 #include <chrono>
 #include <unordered_set>
 
+#ifdef __linux__
+#include <dlfcn.h>
+#endif
+
 #include <ylt/struct_pb.hpp>
 
 #include "mutex.h"
@@ -26,6 +28,68 @@
 
 namespace mooncake {
 
+namespace {
+
+#ifdef __linux__
+typedef int32_t (*NDS_init_fn)(void*, uint64_t);
+typedef int32_t (*NDS_isExists_fn)(uint64_t*, int32_t);
+typedef int32_t (*NDS_get_fn)(uint64_t, uint8_t*, size_t, size_t);
+typedef int32_t (*NDS_put_fn)(uint64_t, uint8_t*, size_t, size_t);
+typedef int32_t (*NDS_batchGet_fn)(uint64_t*, uint8_t**, size_t*, size_t*, int32_t);
+typedef int32_t (*NDS_batchPut_fn)(uint64_t*, uint8_t**, size_t*, size_t*, int32_t);
+
+struct NDSLoader {
+    void* handle = nullptr;
+    NDS_init_fn init = nullptr;
+    NDS_isExists_fn isExists = nullptr;
+    NDS_get_fn get = nullptr;
+    NDS_put_fn put = nullptr;
+    NDS_batchGet_fn batchGet = nullptr;
+    NDS_batchPut_fn batchPut = nullptr;
+
+    static NDSLoader& Instance() {
+        static NDSLoader instance;
+        return instance;
+    }
+
+    bool Load() {
+        if (handle) return true;
+        
+        handle = dlopen("libndskv.so", RTLD_NOW | RTLD_LOCAL);
+        if (!handle) {
+            LOG(ERROR) << "Failed to load libndskv.so: " << dlerror();
+            return false;
+        }
+        
+        init = (NDS_init_fn)dlsym(handle, "NDS_init");
+        isExists = (NDS_isExists_fn)dlsym(handle, "NDS_isExists");
+        get = (NDS_get_fn)dlsym(handle, "NDS_get");
+        put = (NDS_put_fn)dlsym(handle, "NDS_put");
+        batchGet = (NDS_batchGet_fn)dlsym(handle, "NDS_batchGet");
+        batchPut = (NDS_batchPut_fn)dlsym(handle, "NDS_batchPut");
+
+        if (!init || !get || !put || !batchGet || !batchPut) {
+            LOG(ERROR) << "Failed to load NDS functions";
+            dlclose(handle);
+            handle = nullptr;
+            return false;
+        }
+        
+        LOG(INFO) << "Successfully loaded libndskv.so";
+        return true;
+    }
+
+    void Unload() {
+        if (handle) {
+            dlclose(handle);
+            handle = nullptr;
+        }
+    }
+};
+#endif
+
+}
+
 StorageBackend::~StorageBackend() {
     if (use_nds_ && nds_mem_addr_) {
         LOG(INFO) << "Cleaning up NDS KV storage";
@@ -34,6 +98,9 @@ StorageBackend::~StorageBackend() {
         nds_mem_size_ = 0;
         use_nds_ = false;
     }
+#ifdef __linux__
+    NDSLoader::Instance().Unload();
+#endif
 }
 
 bool FilePerKeyConfig::Validate() const {
@@ -133,6 +200,17 @@ tl::expected<void, ErrorCode> StorageBackend::Init(uint64_t quota_bytes = 0) {
         return {};
     }
 
+#ifdef __linux__
+    if (!NDSLoader::Instance().Load()) {
+        LOG(ERROR) << "Failed to load libndskv.so";
+        return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+    }
+    auto& loader = NDSLoader::Instance();
+#else
+    LOG(ERROR) << "NDS not supported on non-Linux platforms";
+    return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+#endif
+
     use_nds_ = true;
     nds_mem_size_ = quota_bytes > 0 ? quota_bytes : 1024 * 1024 * 1024;
     
@@ -142,13 +220,15 @@ tl::expected<void, ErrorCode> StorageBackend::Init(uint64_t quota_bytes = 0) {
         return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
     }
     
-    int32_t result = NDS::init(nds_mem_addr_, nds_mem_size_);
+#ifdef __linux__
+    int32_t result = loader.init(nds_mem_addr_, nds_mem_size_);
     if (result != 0) {
         LOG(ERROR) << "Failed to initialize NDS KV storage: " << result;
         free(nds_mem_addr_);
         nds_mem_addr_ = nullptr;
         return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
     }
+#endif
     
     LOG(INFO) << "NDS KV storage initialized successfully, size: " << nds_mem_size_ << " bytes";
     
@@ -204,19 +284,14 @@ bool StorageBackend::InitQuotaEvict() {
 
 
 tl::expected<std::vector<std::string>, ErrorCode> StorageBackend::StoreObject(
-
     const std::string& path, const std::vector<Slice>& slices, const std::string& key) {
-    // Store to GDS KV instead of local file
-    // ObjectKey key = ExtractKeyFromPath(path);
     uint64_t blockId = objectKeyToUint64(key);
 
-    // Calculate total size and copy data to a single buffer
     size_t total_size = 0;
     for (const auto& slice : slices) {
         total_size += slice.size;
     }
 
-    // Allocate buffer for combined data
     std::vector<uint8_t> buffer(total_size);
     size_t offset = 0;
     for (const auto& slice : slices) {
@@ -224,14 +299,16 @@ tl::expected<std::vector<std::string>, ErrorCode> StorageBackend::StoreObject(
         offset += slice.size;
     }
 
-    // Write data to GDS
-    int32_t gds_result = NDS::put(blockId, buffer.data(), 0, total_size);
-    if (gds_result != 0) {
-        LOG(ERROR) << "Failed to write data to GDS: " << gds_result;
+#ifdef __linux__
+    auto& loader = NDSLoader::Instance();
+    int32_t result = loader.put(blockId, buffer.data(), 0, total_size);
+    if (result != 0) {
+        LOG(ERROR) << "Failed to write data to NDS: " << result;
         return tl::unexpected(ErrorCode::WRITE_FAIL);
     }
+#endif
 
-    VLOG(0) << "Successfully wrote data to GDS for key: " << key;
+    VLOG(0) << "Successfully wrote data to NDS for key: " << key;
     return {};
 }
 #if 0
@@ -366,16 +443,58 @@ tl::expected<std::vector<std::string>, ErrorCode> StorageBackend::StoreObjects(
         buffers.push_back(std::move(buffer));
     }
 
-    int32_t gds_result =
-        NDS::batchPut(blockIds, blockAddrs, offsets, lengths);
-    if (gds_result != 0) {
-        LOG(ERROR) << "NDS::batchPut failed: " << gds_result << " for "
+#ifdef __linux__
+    auto& loader = NDSLoader::Instance();
+    int32_t result = loader.batchPut(blockIds.data(), blockAddrs.data(),
+                                     offsets.data(), lengths.data(),
+                                     static_cast<int32_t>(keys.size()));
+    if (result != 0) {
+        LOG(ERROR) << "NDS batchPut failed: " << result << " for "
                    << keys.size() << " keys";
         return tl::unexpected(ErrorCode::WRITE_FAIL);
     }
+#endif
 
-    VLOG(0) << "Successfully wrote " << keys.size() << " objects to GDS";
+    VLOG(0) << "Successfully wrote " << keys.size() << " objects to NDS";
     return std::vector<std::string>{};
+}
+
+tl::expected<void, ErrorCode> StorageBackend::LoadObjects(
+    const std::vector<std::string>& keys,
+    const std::vector<std::vector<Slice>>& batched_slices) {
+
+    std::vector<uint64_t> blockIds;
+    std::vector<uint8_t*> blockAddrs;
+    std::vector<size_t> offsets;
+    std::vector<size_t> lengths;
+
+    for (size_t i = 0; i < keys.size(); ++i) {
+        const auto& slices = batched_slices[i];
+        size_t total_size = 0;
+        for (const auto& slice : slices) {
+            total_size += slice.size;
+        }
+
+        blockIds.push_back(objectKeyToUint64(keys[i]));
+        blockAddrs.push_back(reinterpret_cast<uint8_t*>(slices[0].ptr));
+        offsets.push_back(0);
+        lengths.push_back(total_size);
+    }
+
+#ifdef __linux__
+    auto& loader = NDSLoader::Instance();
+    int32_t result = loader.batchGet(blockIds.data(), blockAddrs.data(),
+                                     offsets.data(), lengths.data(),
+                                     static_cast<int32_t>(keys.size()));
+    if (result != 0) {
+        LOG(ERROR) << "NDS batchGet failed: " << result << " for "
+                   << keys.size() << " keys";
+        return tl::unexpected(ErrorCode::READ_FAIL);
+    }
+#endif
+
+    VLOG(0) << "Successfully read " << keys.size() << " objects from NDS";
+    return {};
 }
 
 tl::expected<void, ErrorCode> StorageBackend::LoadObject(
