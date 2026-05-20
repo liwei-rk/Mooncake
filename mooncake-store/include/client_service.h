@@ -511,9 +511,19 @@ class Client {
                                bool enable_eviction = true,
                                uint64_t quota_bytes = 0);
 
-    void PutToLocalFile(const std::string& object_key,
-                        const std::vector<Slice>& slices,
-                        const DiskDescriptor& disk_descriptor);
+    /**
+     * @brief Batch-store objects to local disk via NDS::batchPut.
+     * Handles serialization, StorageBackend::StoreObjects call, and batch
+     * master RPCs (PutEnd/PutRevoke/EvictDiskReplica). Call is synchronous.
+     * @param keys Object keys to store
+     * @param batched_slices Data slices for each key
+     * @param disk_descriptors Disk descriptors for each key
+     * @return Per-key results: nullopt = success, ErrorCode = failure
+     */
+    std::vector<std::optional<ErrorCode>> PutBatchToLocalFile(
+        const std::vector<std::string>& keys,
+        const std::vector<std::vector<Slice>>& batched_slices,
+        const std::vector<DiskDescriptor>& disk_descriptors);
     /**
      * @brief Initialize local hot cache
      * @return ErrorCode::OK if use local hot cache,

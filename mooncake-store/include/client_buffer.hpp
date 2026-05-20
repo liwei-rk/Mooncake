@@ -31,7 +31,7 @@ class ClientBufferAllocator
     static std::shared_ptr<ClientBufferAllocator> create(
         size_t size, const std::string& protocol = "",
         bool use_hugepage = false);
-
+        
     // Create for shared memory
     static std::shared_ptr<ClientBufferAllocator> create(
         void* addr, size_t size, const std::string& protocol = "");

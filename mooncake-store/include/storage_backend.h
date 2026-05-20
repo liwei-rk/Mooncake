@@ -246,7 +246,7 @@ class StorageBackendInterface {
     StorageBackendInterface(const FileStorageConfig& file_storage_config);
 
     virtual tl::expected<void, ErrorCode> Init() = 0;
-
+    
     virtual tl::expected<int64_t, ErrorCode> BatchOffload(
         const std::unordered_map<std::string, std::vector<Slice>>& batch_object,
         std::function<ErrorCode(const std::vector<std::string>& keys,
@@ -316,6 +316,8 @@ class StorageBackend {
           fsdir_(fsdir),
           enable_eviction_(enable_eviction) {}
 #endif
+
+    ~StorageBackend();
 
     /**
      * @brief Factory method to create a StorageBackend instance
@@ -421,6 +423,19 @@ class StorageBackend {
         const std::string& key = "");
 
     /**
+     * @brief Batch-stores multiple objects using NDS::batchPut for efficient
+     * NVMe writes.
+     * @param keys Vector of object keys (one per object)
+     * @param batched_slices Vector of slice vectors (one per object)
+     * @return tl::expected with evicted keys on success, ErrorCode on failure.
+     *         On success, all keys were stored atomically.
+     *         On failure, no keys were stored (all-or-nothing for NDS).
+     */
+    tl::expected<std::vector<std::string>, ErrorCode> StoreObjects(
+        const std::vector<std::string>& keys,
+        const std::vector<std::vector<Slice>>& batched_slices);
+
+    /**
      * @brief Loads an object into slices
      * @param path path for the object
      * @param slices Output vector for loaded data slices
@@ -470,6 +485,11 @@ class StorageBackend {
     bool enable_eviction_{
         true};  // User-configurable flag to enable/disable eviction
     bool use_uring_{false};  // Use io_uring for file I/O
+
+    // NDS KV storage members
+    void* nds_mem_addr_ = nullptr;
+    uint64_t nds_mem_size_ = 0;
+    bool use_nds_ = false;
 
 #ifdef USE_3FS
     bool is_3fs_dir_{false};  // Flag to indicate if the storage is using 3FS

@@ -1089,9 +1089,13 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
              it != start_result.value().rend(); ++it) {
             const auto& replica = *it;
             if (replica.is_disk_replica()) {
-                // Store to local file if storage backend is available
                 auto disk_descriptor = replica.get_disk_descriptor();
-                PutToLocalFile(key, slices, disk_descriptor);
+                auto results = PutBatchToLocalFile(
+                    {key}, {{slices}}, {disk_descriptor});
+                if (results[0].has_value()) {
+                    LOG(ERROR) << "Disk storage failed for key " << key
+                               << ": " << toString(results[0].value());
+                }
                 break;  // Only one disk replica is needed
             }
         }
@@ -1264,6 +1268,43 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
         return;
     }
 
+    // === Phase 1: Collect all disk-bound operations, batch them ===
+    if (storage_backend_) {
+        std::vector<size_t> disk_op_indices;
+        std::vector<std::string> disk_keys;
+        std::vector<std::vector<Slice>> disk_slices;
+        std::vector<DiskDescriptor> disk_descriptors;
+
+        for (size_t i = 0; i < ops.size(); ++i) {
+            auto& op = ops[i];
+            if (op.IsResolved() || op.replicas.empty()) continue;
+
+            for (auto it = op.replicas.rbegin(); it != op.replicas.rend();
+                 ++it) {
+                if (it->is_disk_replica()) {
+                    disk_op_indices.push_back(i);
+                    disk_keys.push_back(op.key);
+                    disk_slices.push_back(op.slices);
+                    disk_descriptors.push_back(it->get_disk_descriptor());
+                    break;  // Only one disk replica is needed
+                }
+            }
+        }
+
+        if (!disk_keys.empty()) {
+            auto batch_results = PutBatchToLocalFile(
+                disk_keys, disk_slices, disk_descriptors);
+            for (size_t j = 0; j < disk_op_indices.size(); ++j) {
+                if (batch_results[j].has_value()) {
+                    ops[disk_op_indices[j]].SetError(
+                        batch_results[j].value(),
+                        "Disk storage batch failed");
+                }
+            }
+        }
+    }
+
+    // === Phase 2: Submit memory transfers ===
     for (auto& op : ops) {
         // Skip operations that already failed in previous stages
         if (op.IsResolved()) {
@@ -1279,20 +1320,6 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
 
         bool all_transfers_submitted = true;
         std::string failure_context;
-
-        // We must deal with disk replica first, then the disk putrevoke/putend
-        // can be called surely
-        if (storage_backend_) {
-            for (auto it = op.replicas.rbegin(); it != op.replicas.rend();
-                 ++it) {
-                const auto& replica = *it;
-                if (replica.is_disk_replica()) {
-                    auto disk_descriptor = replica.get_disk_descriptor();
-                    PutToLocalFile(op.key, op.slices, disk_descriptor);
-                    break;  // Only one disk replica is needed
-                }
-            }
-        }
 
         for (size_t replica_idx = 0; replica_idx < op.replicas.size();
              ++replica_idx) {
@@ -2101,67 +2128,59 @@ void Client::PrepareStorageBackend(const std::string& storage_root_dir,
     }
 }
 
-void Client::PutToLocalFile(const std::string& key,
-                            const std::vector<Slice>& slices,
-                            const DiskDescriptor& disk_descriptor) {
-    if (!storage_backend_) return;
+std::vector<std::optional<ErrorCode>> Client::PutBatchToLocalFile(
+    const std::vector<std::string>& keys,
+    const std::vector<std::vector<Slice>>& batched_slices,
+    const std::vector<DiskDescriptor>& disk_descriptors) {
 
-    size_t total_size = 0;
-    for (const auto& slice : slices) {
-        total_size += slice.size;
+    size_t n = keys.size();
+    std::vector<std::optional<ErrorCode>> results(n);
+
+    if (!storage_backend_ || n == 0) return results;
+
+    // 1. Batch I/O via NDS::batchPut
+    auto store_result = storage_backend_->StoreObjects(keys, batched_slices);
+
+    if (!store_result) {
+        LOG(ERROR) << "StoreObjects batch failed: "
+                   << toString(store_result.error()) << " for " << n
+                   << " keys";
+
+        auto revoke_responses = master_client_.BatchPutRevoke(keys);
+        for (size_t i = 0; i < n; ++i) {
+            results[i] = store_result.error();
+        }
+        return results;
     }
 
-    std::string path = disk_descriptor.file_path;
-    // Currently, persistence is achieved through asynchronous writes, but
-    // before asynchronous writing in 3FS, significant performance degradation
-    // may occur due to data copying. Profiling reveals that the number of page
-    // faults triggered in this scenario is nearly double the normal count.
-    // Future plans include introducing a reuse buffer list to address this
-    // performance degradation issue.
-
-    std::string value;
-    value.reserve(total_size);
-    for (const auto& slice : slices) {
-        value.append(static_cast<char*>(slice.ptr), slice.size);
+    // 2. Notify master about evicted disk replicas (if any)
+    const auto& evicted_keys = store_result.value();
+    if (!evicted_keys.empty()) {
+        auto evict_responses = master_client_.BatchEvictDiskReplica(
+            evicted_keys, ReplicaType::DISK);
+        for (size_t i = 0; i < evict_responses.size(); ++i) {
+            if (!evict_responses[i]) {
+                LOG(WARNING)
+                    << "Failed to notify master about evicted key: "
+                    << evicted_keys[i]
+                    << ", error: " << evict_responses[i].error();
+            }
+        }
     }
 
-    write_thread_pool_.enqueue([this, backend = storage_backend_, key,
-                                value = std::move(value), path] {
-        // Store the object
-        auto store_result = backend->StoreObject(path, value, key);
-        ReplicaType replica_type = ReplicaType::DISK;
-
-        if (!store_result) {
-            // If storage failed, revoke the put operation
-            LOG(ERROR) << "Failed to store object for key: " << key;
-            auto revoke_result = master_client_.PutRevoke(key, replica_type);
-            if (!revoke_result) {
-                LOG(ERROR) << "Failed to revoke put operation for key: " << key;
-            }
-            return;
-        }
-
-        // Notify master about any evicted disk replicas (batch)
-        if (!store_result.value().empty()) {
-            const auto& evicted_keys = store_result.value();
-            auto evict_results = master_client_.BatchEvictDiskReplica(
-                evicted_keys, replica_type);
-            for (size_t i = 0; i < evict_results.size(); ++i) {
-                if (!evict_results[i]) {
-                    LOG(WARNING)
-                        << "Failed to notify master about evicted key: "
-                        << evicted_keys[i]
-                        << ", error: " << evict_results[i].error();
-                }
-            }
-        }
-
-        // If storage succeeded, end the put operation
-        auto end_result = master_client_.PutEnd(key, replica_type);
+    // 3. Disk PutEnd for each key (uses ReplicaType::DISK so must be
+    //    per-key; BatchPutEnd lacks the ReplicaType parameter).
+    for (size_t i = 0; i < n; ++i) {
+        auto end_result =
+            master_client_.PutEnd(keys[i], ReplicaType::DISK);
         if (!end_result) {
-            LOG(ERROR) << "Failed to end put operation for key: " << key;
+            LOG(ERROR) << "PutEnd(DISK) failed for key " << keys[i]
+                       << ": " << toString(end_result.error());
+            results[i] = end_result.error();
         }
-    });
+    }
+
+    return results;
 }
 
 ErrorCode Client::TransferData(const Replica::Descriptor& replica_descriptor,

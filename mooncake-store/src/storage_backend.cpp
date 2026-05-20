@@ -26,6 +26,16 @@
 
 namespace mooncake {
 
+StorageBackend::~StorageBackend() {
+    if (use_nds_ && nds_mem_addr_) {
+        LOG(INFO) << "Cleaning up NDS KV storage";
+        free(nds_mem_addr_);
+        nds_mem_addr_ = nullptr;
+        nds_mem_size_ = 0;
+        use_nds_ = false;
+    }
+}
+
 bool FilePerKeyConfig::Validate() const {
     if (fsdir.empty()) {
         LOG(ERROR) << "FilePerKeyConfig: fsdir is invalid";
@@ -118,129 +128,37 @@ bool StorageBackend::IsEvictionEnabled() const {
 }
 
 tl::expected<void, ErrorCode> StorageBackend::Init(uint64_t quota_bytes = 0) {
-    // Skip eviction initialization for 3FS mode
-    if (!IsEvictionEnabled()) {
-        initialized_.store(true, std::memory_order_release);
-        return {};
-    }
-
     if (initialized_.load(std::memory_order_acquire)) {
         LOG(WARNING) << "StorageBackend is already initialized. Skipping.";
         return {};
     }
 
-    namespace fs = std::filesystem;
-    std::string actual_fsdir = GetActualFsdir();
-    fs::path storage_root = fs::path(root_dir_) / actual_fsdir;
-
-    std::error_code ec;
-    if (!fs::exists(storage_root)) {
-        fs::create_directories(storage_root, ec);
-        if (ec) {
-            LOG(ERROR) << "Failed to create storage root directory: "
-                       << storage_root;
-            return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
-        }
-    }
-    const auto space_info = fs::space(storage_root, ec);
-    if (ec) {
-        LOG(ERROR) << "Init: Failed to get disk space info: " << ec.message();
+    use_nds_ = true;
+    nds_mem_size_ = quota_bytes > 0 ? quota_bytes : 1024 * 1024 * 1024;
+    
+    nds_mem_addr_ = malloc(nds_mem_size_);
+    if (!nds_mem_addr_) {
+        LOG(ERROR) << "Failed to allocate memory for NDS: " << nds_mem_size_ << " bytes";
         return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
     }
-    LOG(INFO) << "Reconstructing storage state from disk at: " << storage_root;
-    std::vector<fs::directory_entry> existing_files;
-    try {
-        for (const auto& entry :
-             fs::recursive_directory_iterator(storage_root)) {
-            if (entry.is_regular_file(ec) && !ec) {
-                existing_files.push_back(entry);
-            }
-        }
-    } catch (const fs::filesystem_error& e) {
-        LOG(ERROR) << "Error during disk scan for state reconstruction: "
-                   << e.what();
+    
+    int32_t result = NDS::init(nds_mem_addr_, nds_mem_size_);
+    if (result != 0) {
+        LOG(ERROR) << "Failed to initialize NDS KV storage: " << result;
+        free(nds_mem_addr_);
+        nds_mem_addr_ = nullptr;
         return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
     }
-    std::sort(existing_files.begin(), existing_files.end(),
-              [](const auto& a, const auto& b) {
-                  struct statx stx_a, stx_b;
-                  bool success_a = (statx(AT_FDCWD, a.path().c_str(), 0,
-                                          STATX_BTIME, &stx_a) == 0);
-                  bool success_b = (statx(AT_FDCWD, b.path().c_str(), 0,
-                                          STATX_BTIME, &stx_b) == 0);
-
-                  if (!success_a || !success_b) {
-                      return false;
-                  }
-
-                  if (stx_a.stx_btime.tv_sec == stx_b.stx_btime.tv_sec) {
-                      return stx_a.stx_btime.tv_nsec < stx_b.stx_btime.tv_nsec;
-                  }
-                  return stx_a.stx_btime.tv_sec < stx_b.stx_btime.tv_sec;
-              });
-    bool eviction_needed = false;
-    {
-        std::unique_lock<std::shared_mutex> space_lock(space_mutex_);
-        std::unique_lock<std::shared_mutex> queue_lock(file_queue_mutex_);
-        used_space_ = 0;
-
-        for (const auto& entry : existing_files) {
-            uint64_t file_size = entry.file_size(ec);
-            if (!ec) {
-                const std::string& path_str = entry.path().string();
-                file_write_queue_.push_back({path_str, file_size, ""});
-                file_queue_map_[path_str] = std::prev(file_write_queue_.end());
-                used_space_ += file_size;
-            } else {
-                LOG(WARNING) << "Could not get size of existing file "
-                             << entry.path() << ", skipping.";
-            }
-        }
-        if (quota_bytes > 0) {
-            total_space_ = quota_bytes;
-        } else {
-            constexpr double kDefaultQuotaPercentage = 0.9;
-            total_space_ = static_cast<uint64_t>(space_info.capacity *
-                                                 kDefaultQuotaPercentage);
-        }
-        if (total_space_ >= used_space_) {
-            RecalculateAvailableSpace();
-        } else {
-            // Only enable eviction for local storage, not for 3FS
-            if (IsEvictionEnabled()) {
-                eviction_needed = true;
-                available_space_ = -1;
-                LOG(WARNING)
-                    << "Existing used space (" << used_space_
-                    << ") exceeds the new quota (" << total_space_
-                    << "). Eviction will be triggered after initial setup.";
-            } else {
-                // For 3FS mode, just log a warning but don't trigger eviction
-                LOG(WARNING) << "Existing used space (" << used_space_
-                             << ") exceeds the new quota (" << total_space_
-                             << "). Eviction is disabled for 3FS mode.";
-                RecalculateAvailableSpace();  // Still calculate available space
-            }
-        }
-    }
-    if (eviction_needed) {
-        if (!InitQuotaEvict()) {
-            LOG(ERROR) << "Initialization failed due to failure in enforcing "
-                          "storage quota.";
-            initialized_.store(false, std::memory_order_release);
-            return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
-        }
-    }
-
+    
+    LOG(INFO) << "NDS KV storage initialized successfully, size: " << nds_mem_size_ << " bytes";
+    
     {
         std::unique_lock<std::shared_mutex> lock(space_mutex_);
-        RecalculateAvailableSpace();
-
-        LOG(INFO) << "Init: "
-                  << "Quota: " << total_space_ << ", Used: " << used_space_
-                  << ", Available: " << available_space_;
+        total_space_ = nds_mem_size_;
+        used_space_ = 0;
+        available_space_ = nds_mem_size_;
     }
-
+    
     initialized_.store(true, std::memory_order_release);
     return {};
 }
@@ -414,6 +332,50 @@ tl::expected<std::vector<std::string>, ErrorCode> StorageBackend::StoreObject(
     }
 
     return evicted_keys;
+}
+
+tl::expected<std::vector<std::string>, ErrorCode> StorageBackend::StoreObjects(
+    const std::vector<std::string>& keys,
+    const std::vector<std::vector<Slice>>& batched_slices) {
+
+    std::vector<uint64_t> blockIds;
+    std::vector<uint8_t*> blockAddrs;
+    std::vector<size_t> offsets;
+    std::vector<size_t> lengths;
+    std::vector<std::vector<uint8_t>> buffers;
+    buffers.reserve(keys.size());
+
+    for (size_t i = 0; i < keys.size(); ++i) {
+        const auto& slices = batched_slices[i];
+        size_t total_size = 0;
+        for (const auto& slice : slices) {
+            total_size += slice.size;
+        }
+
+        std::vector<uint8_t> buffer(total_size);
+        size_t off = 0;
+        for (const auto& slice : slices) {
+            std::memcpy(buffer.data() + off, slice.ptr, slice.size);
+            off += slice.size;
+        }
+
+        blockIds.push_back(objectKeyToUint64(keys[i]));
+        blockAddrs.push_back(buffer.data());
+        offsets.push_back(0);
+        lengths.push_back(total_size);
+        buffers.push_back(std::move(buffer));
+    }
+
+    int32_t gds_result =
+        NDS::batchPut(blockIds, blockAddrs, offsets, lengths);
+    if (gds_result != 0) {
+        LOG(ERROR) << "NDS::batchPut failed: " << gds_result << " for "
+                   << keys.size() << " keys";
+        return tl::unexpected(ErrorCode::WRITE_FAIL);
+    }
+
+    VLOG(0) << "Successfully wrote " << keys.size() << " objects to GDS";
+    return std::vector<std::string>{};
 }
 
 tl::expected<void, ErrorCode> StorageBackend::LoadObject(

@@ -185,6 +185,35 @@ int32_t put(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len) {
     return 0;  // Success
 }
 
+int32_t batchPut(std::vector<uint64_t> blockIds,
+                 std::vector<uint8_t*> blockAddrs,
+                 std::vector<size_t> offsets,
+                 std::vector<size_t> lengths) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    if (!g_initialized) {
+        std::cout << "DEBUG: NDS not initialized" << std::endl;
+        return -1;
+    }
+
+    if (blockIds.size() != blockAddrs.size() ||
+        blockIds.size() != offsets.size() ||
+        blockIds.size() != lengths.size()) {
+        std::cout << "DEBUG: batchPut input size mismatch" << std::endl;
+        return -8;
+    }
+
+    for (size_t i = 0; i < blockIds.size(); ++i) {
+        int32_t result = put(blockIds[i], blockAddrs[i], offsets[i], lengths[i]);
+        if (result != 0) {
+            std::cout << "DEBUG: batchPut failed at index " << i
+                      << " blockId=" << blockIds[i] << std::endl;
+            return result;
+        }
+    }
+    return 0;
+}
+
 // C interface functions for linking
 extern "C" {
 
@@ -203,6 +232,15 @@ int32_t NDS_get(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len)
 
 int32_t NDS_put(uint64_t blockId, uint8_t* blockAddr, size_t offset, size_t len) {
     return NDS::put(blockId, blockAddr, offset, len);
+}
+
+int32_t NDS_batchPut(uint64_t* blockIds, uint8_t** blockAddrs,
+                     size_t* offsets, size_t* lengths, int32_t count) {
+    std::vector<uint64_t> ids(blockIds, blockIds + count);
+    std::vector<uint8_t*> addrs(blockAddrs, blockAddrs + count);
+    std::vector<size_t> offs(offsets, offsets + count);
+    std::vector<size_t> lens(lengths, lengths + count);
+    return NDS::batchPut(ids, addrs, offs, lens);
 }
 
 } // extern "C"
