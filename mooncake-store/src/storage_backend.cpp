@@ -6,6 +6,7 @@
 #include <sys/uio.h>
 #include <errno.h>
 #include <cstring>
+#include <cstdlib>
 
 #include <regex>
 #include <string>
@@ -44,6 +45,9 @@ struct NDSLoader {
     NDS_put_fn put = nullptr;
     NDS_batchGet_fn batchGet = nullptr;
     NDS_batchPut_fn batchPut = nullptr;
+    bool nds_initialized = false;
+    void* nds_mem_addr = nullptr;
+    uint64_t nds_mem_size = 0;
 
     static NDSLoader& Instance() {
         static NDSLoader instance;
@@ -52,19 +56,22 @@ struct NDSLoader {
 
     bool Load() {
         if (handle) return true;
+
+        const char* env_path = std::getenv("NDS_LIBRARY_PATH");
+        std::string lib_path = env_path ? env_path : "libndskv.so";
         
-        handle = dlopen("libndskv.so", RTLD_NOW | RTLD_LOCAL);
+        handle = dlopen(lib_path.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (!handle) {
-            LOG(ERROR) << "Failed to load libndskv.so: " << dlerror();
+            LOG(ERROR) << "Failed to load " << lib_path << ": " << dlerror();
             return false;
         }
         
-        init = (NDS_init_fn)dlsym(handle, "NDS_init");
-        isExists = (NDS_isExists_fn)dlsym(handle, "NDS_isExists");
-        get = (NDS_get_fn)dlsym(handle, "NDS_get");
-        put = (NDS_put_fn)dlsym(handle, "NDS_put");
-        batchGet = (NDS_batchGet_fn)dlsym(handle, "NDS_batchGet");
-        batchPut = (NDS_batchPut_fn)dlsym(handle, "NDS_batchPut");
+        init = (NDS_init_fn)dlsym(handle, "init");
+        isExists = (NDS_isExists_fn)dlsym(handle, "isExists");
+        get = (NDS_get_fn)dlsym(handle, "get");
+        put = (NDS_put_fn)dlsym(handle, "put");
+        batchGet = (NDS_batchGet_fn)dlsym(handle, "batchGet");
+        batchPut = (NDS_batchPut_fn)dlsym(handle, "batchPut");
 
         if (!init || !get || !put || !batchGet || !batchPut) {
             LOG(ERROR) << "Failed to load NDS functions";
@@ -88,14 +95,18 @@ struct NDSLoader {
 }
 
 StorageBackend::~StorageBackend() {
-    if (use_nds_ && nds_mem_addr_) {
+    if (use_nds_ && nds_mem_addr_ && owns_nds_memory_) {
         LOG(INFO) << "Cleaning up NDS KV storage";
         free(nds_mem_addr_);
         nds_mem_addr_ = nullptr;
         nds_mem_size_ = 0;
         use_nds_ = false;
+        owns_nds_memory_ = false;
+        auto& loader = NDSLoader::Instance();
+        loader.nds_initialized = false;
+        loader.nds_mem_addr = nullptr;
+        loader.nds_mem_size = 0;
     }
-    NDSLoader::Instance().Unload();
 }
 
 bool FilePerKeyConfig::Validate() const {
@@ -189,45 +200,153 @@ bool StorageBackend::IsEvictionEnabled() const {
 #endif
 }
 
-tl::expected<void, ErrorCode> StorageBackend::Init(uint64_t quota_bytes = 0) {
+tl::expected<void, ErrorCode> StorageBackend::Init(uint64_t quota_bytes) {
     if (initialized_.load(std::memory_order_acquire)) {
         LOG(WARNING) << "StorageBackend is already initialized. Skipping.";
         return {};
     }
 
-if (!NDSLoader::Instance().Load()) {
-        LOG(ERROR) << "Failed to load libndskv.so";
+    const char* nds_library_path_env = std::getenv("NDS_LIBRARY_PATH");
+    bool nds_required = (nds_library_path_env != nullptr);
+    bool nds_loaded = NDSLoader::Instance().Load();
+
+    if (nds_required && !nds_loaded) {
+        LOG(ERROR) << "NDS_LIBRARY_PATH is set but failed to load NDS library";
+        return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+    }
+
+    if (nds_loaded) {
+        auto& loader = NDSLoader::Instance();
+        use_nds_ = true;
+
+        if (!loader.nds_initialized) {
+            nds_mem_size_ = quota_bytes > 0 ? quota_bytes : 1024 * 1024 * 1024;
+
+            constexpr size_t kNDSAlignment = 4096;
+            size_t aligned_size =
+                ((nds_mem_size_ + kNDSAlignment - 1) / kNDSAlignment) *
+                kNDSAlignment;
+
+            nds_mem_addr_ = std::aligned_alloc(kNDSAlignment, aligned_size);
+            if (!nds_mem_addr_) {
+                fprintf(stderr, "Failed to allocate 4096-aligned memory for NDS: %zu bytes\n",
+                        aligned_size);
+                return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+            }
+
+            int32_t result = loader.init(nds_mem_addr_, nds_mem_size_);
+            if (result != 0) {
+                fprintf(stderr, "Failed to initialize NDS KV storage: %d\n", result);
+                free(nds_mem_addr_);
+                nds_mem_addr_ = nullptr;
+                return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+            }
+
+            fprintf(stderr, "NDS KV storage initialized successfully, size: %zu bytes\n",
+                    nds_mem_size_);
+            owns_nds_memory_ = true;
+            loader.nds_initialized = true;
+            loader.nds_mem_addr = nds_mem_addr_;
+            loader.nds_mem_size = nds_mem_size_;
+
+            {
+                std::unique_lock<std::shared_mutex> lock(space_mutex_);
+                total_space_ = nds_mem_size_;
+                used_space_ = 0;
+                available_space_ = nds_mem_size_;
+            }
+        } else {
+            fprintf(stderr, "NDS KV storage already initialized, reusing existing instance\n");
+            nds_mem_addr_ = loader.nds_mem_addr;
+            nds_mem_size_ = loader.nds_mem_size;
+
+            {
+                std::unique_lock<std::shared_mutex> lock(space_mutex_);
+                total_space_ = nds_mem_size_;
+                used_space_ = 0;
+                available_space_ = nds_mem_size_;
+            }
+        }
+    } else {
+        fprintf(stderr, "NDS library not available, using file-based storage backend\n");
+    }
+
+    initialized_.store(true, std::memory_order_release);
+    return {};
+}
+
+tl::expected<void, ErrorCode> StorageBackend::InitWithMemory(
+    void* nds_mem_addr, uint64_t nds_mem_size) {
+    if (initialized_.load(std::memory_order_acquire)) {
+        LOG(WARNING) << "StorageBackend is already initialized. Skipping.";
+        return {};
+    }
+
+    if (!nds_mem_addr) {
+        LOG(ERROR) << "InitWithMemory: nds_mem_addr is nullptr";
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    if (nds_mem_size == 0) {
+        LOG(ERROR) << "InitWithMemory: nds_mem_size is 0";
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
+
+    constexpr size_t kNDSAlignment = 4096;
+    if ((reinterpret_cast<uintptr_t>(nds_mem_addr) % kNDSAlignment) != 0) {
+        LOG(ERROR) << "InitWithMemory: memory address " << nds_mem_addr
+                   << " is not " << kNDSAlignment << "-byte aligned";
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
+
+    bool nds_loaded = NDSLoader::Instance().Load();
+    if (!nds_loaded) {
+        LOG(ERROR) << "InitWithMemory: failed to load NDS library";
         return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
     }
 
     auto& loader = NDSLoader::Instance();
-
     use_nds_ = true;
-    nds_mem_size_ = quota_bytes > 0 ? quota_bytes : 1024 * 1024 * 1024;
-    
-    nds_mem_addr_ = malloc(nds_mem_size_);
-    if (!nds_mem_addr_) {
-        LOG(ERROR) << "Failed to allocate memory for NDS: " << nds_mem_size_ << " bytes";
-        return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+    owns_nds_memory_ = false;
+
+    if (!loader.nds_initialized) {
+        nds_mem_addr_ = nds_mem_addr;
+        nds_mem_size_ = nds_mem_size;
+
+        int32_t result = loader.init(nds_mem_addr_, nds_mem_size_);
+        if (result != 0) {
+            fprintf(stderr, "Failed to initialize NDS KV storage with external memory: %d\n",
+                    result);
+            nds_mem_addr_ = nullptr;
+            nds_mem_size_ = 0;
+            use_nds_ = false;
+            return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+        }
+
+        fprintf(stderr,
+                "NDS KV storage initialized with external memory, addr=%p size=%zu bytes\n",
+                nds_mem_addr_, nds_mem_size_);
+        loader.nds_initialized = true;
+        loader.nds_mem_addr = nds_mem_addr_;
+        loader.nds_mem_size = nds_mem_size_;
+    } else {
+        if (loader.nds_mem_addr != nds_mem_addr) {
+            LOG(WARNING)
+                << "NDS already initialized with different memory address. "
+                << "Using existing address: " << loader.nds_mem_addr;
+        }
+        nds_mem_addr_ = loader.nds_mem_addr;
+        nds_mem_size_ = loader.nds_mem_size;
+        fprintf(stderr,
+                "NDS KV storage already initialized, reusing existing instance\n");
     }
-    
-int32_t result = loader.init(nds_mem_addr_, nds_mem_size_);
-    if (result != 0) {
-        LOG(ERROR) << "Failed to initialize NDS KV storage: " << result;
-        free(nds_mem_addr_);
-        nds_mem_addr_ = nullptr;
-        return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
-    }
-    
-    LOG(INFO) << "NDS KV storage initialized successfully, size: " << nds_mem_size_ << " bytes";
-    
+
     {
         std::unique_lock<std::shared_mutex> lock(space_mutex_);
         total_space_ = nds_mem_size_;
         used_space_ = 0;
         available_space_ = nds_mem_size_;
     }
-    
+
     initialized_.store(true, std::memory_order_release);
     return {};
 }
@@ -274,42 +393,50 @@ bool StorageBackend::InitQuotaEvict() {
 
 tl::expected<std::vector<std::string>, ErrorCode> StorageBackend::StoreObject(
     const std::string& path, const std::vector<Slice>& slices, const std::string& key) {
-    uint64_t blockId = objectKeyToUint64(key);
+    if (use_nds_) {
+        uint64_t blockId = objectKeyToUint64(key);
+        auto& loader = NDSLoader::Instance();
+
+        std::vector<uint64_t> blockIds;
+        std::vector<uint8_t*> blockAddrs;
+        std::vector<size_t> nds_offsets;
+        std::vector<size_t> nds_lengths;
+
+        size_t slice_offset = 0;
+        for (const auto& slice : slices) {
+            blockIds.push_back(blockId);
+            blockAddrs.push_back(reinterpret_cast<uint8_t*>(slice.ptr));
+            nds_offsets.push_back(slice_offset);
+            nds_lengths.push_back(slice.size);
+            slice_offset += slice.size;
+        }
+
+        fprintf(stderr, "[NDS StoreObject] key=%s blockId=%llu num_slices=%zu\n",
+                key.c_str(), (unsigned long long)blockId, blockIds.size());
+        for (size_t i = 0; i < blockIds.size(); ++i) {
+            fprintf(stderr, "  slice[%zu]: blockId=%llu addr=%p offset=%zu length=%zu\n",
+                    i, (unsigned long long)blockIds[i], blockAddrs[i],
+                    nds_offsets[i], nds_lengths[i]);
+        }
+
+        int32_t result = loader.batchPut(blockIds.data(), blockAddrs.data(),
+                                         nds_offsets.data(), nds_lengths.data(),
+                                         static_cast<int32_t>(blockIds.size()));
+        if (result != 0) {
+            fprintf(stderr, "Failed to write data to NDS: %d\n", result);
+            return tl::unexpected(ErrorCode::WRITE_FAIL);
+        }
+
+        fprintf(stderr, "Successfully wrote data to NDS for key: %s (%zu slices)\n",
+                key.c_str(), blockIds.size());
+        return {};
+    }
 
     size_t total_size = 0;
     for (const auto& slice : slices) {
         total_size += slice.size;
     }
 
-    std::vector<uint8_t> buffer(total_size);
-    size_t offset = 0;
-    for (const auto& slice : slices) {
-        std::memcpy(buffer.data() + offset, slice.ptr, slice.size);
-        offset += slice.size;
-    }
-
-auto& loader = NDSLoader::Instance();
-    int32_t result = loader.put(blockId, buffer.data(), 0, total_size);
-    if (result != 0) {
-        LOG(ERROR) << "Failed to write data to NDS: " << result;
-        return tl::unexpected(ErrorCode::WRITE_FAIL);
-    }
-
-    VLOG(0) << "Successfully wrote data to NDS for key: " << key;
-    return {};
-}
-
-#if 0
-
-tl::expected<std::vector<std::string>, ErrorCode> StorageBackend::StoreObject(
-    const std::string& path, const std::vector<Slice>& slices,
-    const std::string& key) {
-    size_t total_size = 0;
-    for (const auto& slice : slices) {
-        total_size += slice.size;
-    }
-
-    // For eviction-enabled mode, check space and reserve
     std::vector<std::string> evicted_keys;
     uint64_t reserved_size = 0;
     if (IsEvictionEnabled()) {
@@ -328,7 +455,6 @@ tl::expected<std::vector<std::string>, ErrorCode> StorageBackend::StoreObject(
         reserved_size = total_size;
     }
 
-    // Create file and write data (common logic for both modes)
     auto file_result = CreateFileForWriting(path, reserved_size);
     if (!file_result) {
         return tl::make_unexpected(file_result.error());
@@ -340,14 +466,14 @@ tl::expected<std::vector<std::string>, ErrorCode> StorageBackend::StoreObject(
         return tl::make_unexpected(write_result.error());
     }
 
-    // For eviction-enabled mode, add file to tracking queue
     if (IsEvictionEnabled()) {
         AddFileToWriteQueue(path, total_size, key);
     }
 
     return evicted_keys;
 }
-#endif
+
+
 
 tl::expected<std::vector<std::string>, ErrorCode> StorageBackend::StoreObject(
     const std::string& path, const std::string& str, const std::string& key) {
@@ -405,43 +531,42 @@ tl::expected<std::vector<std::string>, ErrorCode> StorageBackend::StoreObjects(
 
     std::vector<uint64_t> blockIds;
     std::vector<uint8_t*> blockAddrs;
-    std::vector<size_t> offsets;
-    std::vector<size_t> lengths;
-    std::vector<std::vector<uint8_t>> buffers;
-    buffers.reserve(keys.size());
+    std::vector<size_t> nds_offsets;
+    std::vector<size_t> nds_lengths;
 
     for (size_t i = 0; i < keys.size(); ++i) {
         const auto& slices = batched_slices[i];
-        size_t total_size = 0;
+        uint64_t blockId = objectKeyToUint64(keys[i]);
+        size_t slice_offset = 0;
         for (const auto& slice : slices) {
-            total_size += slice.size;
+            blockIds.push_back(blockId);
+            blockAddrs.push_back(reinterpret_cast<uint8_t*>(slice.ptr));
+            nds_offsets.push_back(slice_offset);
+            nds_lengths.push_back(slice.size);
+            slice_offset += slice.size;
         }
-
-        std::vector<uint8_t> buffer(total_size);
-        size_t off = 0;
-        for (const auto& slice : slices) {
-            std::memcpy(buffer.data() + off, slice.ptr, slice.size);
-            off += slice.size;
-        }
-
-        blockIds.push_back(objectKeyToUint64(keys[i]));
-        blockAddrs.push_back(buffer.data());
-        offsets.push_back(0);
-        lengths.push_back(total_size);
-        buffers.push_back(std::move(buffer));
     }
 
-auto& loader = NDSLoader::Instance();
+    fprintf(stderr, "[NDS StoreObjects] num_keys=%zu num_slices=%zu\n",
+            keys.size(), blockIds.size());
+    for (size_t i = 0; i < blockIds.size(); ++i) {
+        fprintf(stderr, "  slice[%zu]: blockId=%llu addr=%p offset=%zu length=%zu\n",
+                i, (unsigned long long)blockIds[i], blockAddrs[i],
+                nds_offsets[i], nds_lengths[i]);
+    }
+
+    auto& loader = NDSLoader::Instance();
     int32_t result = loader.batchPut(blockIds.data(), blockAddrs.data(),
-                                     offsets.data(), lengths.data(),
-                                     static_cast<int32_t>(keys.size()));
+                                     nds_offsets.data(), nds_lengths.data(),
+                                     static_cast<int32_t>(blockIds.size()));
     if (result != 0) {
-        LOG(ERROR) << "NDS batchPut failed: " << result << " for "
-                   << keys.size() << " keys";
+        fprintf(stderr, "NDS batchPut failed: %d for %zu slices\n",
+                result, blockIds.size());
         return tl::unexpected(ErrorCode::WRITE_FAIL);
     }
 
-    VLOG(0) << "Successfully wrote " << keys.size() << " objects to NDS";
+    fprintf(stderr, "Successfully wrote %zu objects (%zu slices) to NDS\n",
+            keys.size(), blockIds.size());
     return std::vector<std::string>{};
 }
 
@@ -450,28 +575,40 @@ tl::expected<void, ErrorCode> StorageBackend::LoadObject(
     const std::string& path, std::vector<Slice>& slices, int64_t length) {
     if (use_nds_) {
         uint64_t blockId = objectKeyToUint64(path);
-        size_t total_size = 0;
-        for (const auto& slice : slices) {
-            total_size += slice.size;
-        }
-
-        std::vector<uint8_t> buffer(total_size);
         auto& loader = NDSLoader::Instance();
-        int32_t result = loader.get(blockId, buffer.data(), 0, total_size);
-        if (result != 0) {
-            LOG(ERROR) << "Failed to read data from NDS: " << result;
-            return tl::unexpected(ErrorCode::READ_FAIL);
-        }
 
-        size_t offset = 0;
+        std::vector<uint64_t> blockIds;
+        std::vector<uint8_t*> blockAddrs;
+        std::vector<size_t> nds_offsets;
+        std::vector<size_t> nds_lengths;
+
+        size_t slice_offset = 0;
         for (auto& slice : slices) {
-            if (slice.ptr != nullptr) {
-                std::memcpy(slice.ptr, buffer.data() + offset, slice.size);
-            }
-            offset += slice.size;
+            blockIds.push_back(blockId);
+            blockAddrs.push_back(reinterpret_cast<uint8_t*>(slice.ptr));
+            nds_offsets.push_back(slice_offset);
+            nds_lengths.push_back(slice.size);
+            slice_offset += slice.size;
         }
 
-        VLOG(0) << "Successfully read data from NDS for key: " << path;
+        fprintf(stderr, "[NDS LoadObject] key=%s blockId=%llu num_slices=%zu\n",
+                path.c_str(), (unsigned long long)blockId, blockIds.size());
+        for (size_t i = 0; i < blockIds.size(); ++i) {
+            fprintf(stderr, "  slice[%zu]: blockId=%llu addr=%p offset=%zu length=%zu\n",
+                    i, (unsigned long long)blockIds[i], blockAddrs[i],
+                    nds_offsets[i], nds_lengths[i]);
+        }
+
+        int32_t result = loader.batchGet(blockIds.data(), blockAddrs.data(),
+                                         nds_offsets.data(), nds_lengths.data(),
+                                         static_cast<int32_t>(blockIds.size()));
+        if (result != 0) {
+            fprintf(stderr, "Failed to read data from NDS: %d\n", result);
+            return tl::unexpected(ErrorCode::FILE_READ_FAIL);
+        }
+
+        fprintf(stderr, "Successfully read data from NDS for key: %s (%zu slices)\n",
+                path.c_str(), blockIds.size());
         return {};
     }
 
@@ -582,33 +719,42 @@ tl::expected<void, ErrorCode> StorageBackend::LoadObjects(
 
     std::vector<uint64_t> blockIds;
     std::vector<uint8_t*> blockAddrs;
-    std::vector<size_t> offsets;
-    std::vector<size_t> lengths;
+    std::vector<size_t> nds_offsets;
+    std::vector<size_t> nds_lengths;
 
     for (size_t i = 0; i < keys.size(); ++i) {
         const auto& slices = batched_slices[i];
-        size_t total_size = 0;
+        uint64_t blockId = objectKeyToUint64(keys[i]);
+        size_t slice_offset = 0;
         for (const auto& slice : slices) {
-            total_size += slice.size;
+            blockIds.push_back(blockId);
+            blockAddrs.push_back(reinterpret_cast<uint8_t*>(slice.ptr));
+            nds_offsets.push_back(slice_offset);
+            nds_lengths.push_back(slice.size);
+            slice_offset += slice.size;
         }
-
-        blockIds.push_back(objectKeyToUint64(keys[i]));
-        blockAddrs.push_back(reinterpret_cast<uint8_t*>(slices[0].ptr));
-        offsets.push_back(0);
-        lengths.push_back(total_size);
     }
 
-auto& loader = NDSLoader::Instance();
+    fprintf(stderr, "[NDS LoadObjects] num_keys=%zu num_slices=%zu\n",
+            keys.size(), blockIds.size());
+    for (size_t i = 0; i < blockIds.size(); ++i) {
+        fprintf(stderr, "  slice[%zu]: blockId=%llu addr=%p offset=%zu length=%zu\n",
+                i, (unsigned long long)blockIds[i], blockAddrs[i],
+                nds_offsets[i], nds_lengths[i]);
+    }
+
+    auto& loader = NDSLoader::Instance();
     int32_t result = loader.batchGet(blockIds.data(), blockAddrs.data(),
-                                     offsets.data(), lengths.data(),
-                                     static_cast<int32_t>(keys.size()));
+                                     nds_offsets.data(), nds_lengths.data(),
+                                     static_cast<int32_t>(blockIds.size()));
     if (result != 0) {
-        LOG(ERROR) << "NDS batchGet failed: " << result << " for "
-                   << keys.size() << " keys";
-        return tl::unexpected(ErrorCode::READ_FAIL);
+        fprintf(stderr, "NDS batchGet failed: %d for %zu slices\n",
+                result, blockIds.size());
+        return tl::unexpected(ErrorCode::FILE_READ_FAIL);
     }
 
-    VLOG(0) << "Successfully read " << keys.size() << " objects from NDS";
+    fprintf(stderr, "Successfully read %zu objects (%zu slices) from NDS\n",
+            keys.size(), blockIds.size());
     return {};
 }
 

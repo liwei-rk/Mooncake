@@ -321,6 +321,8 @@ class StorageBackend {
           enable_eviction_(enable_eviction) {}
 #endif
 
+    ~StorageBackend();
+
     /**
      * @brief Factory method to create a StorageBackend instance
      * @param root_dir Root directory path for object storage
@@ -336,20 +338,6 @@ class StorageBackend {
     static std::shared_ptr<StorageBackend> Create(const std::string& root_dir,
                                                   const std::string& fsdir,
                                                   bool enable_eviction = true) {
-        namespace fs = std::filesystem;
-        if (!fs::exists(root_dir)) {
-            LOG(INFO) << "Root directory does not exist: " << root_dir;
-            return nullptr;
-        } else if (!fs::is_directory(root_dir)) {
-            LOG(INFO) << "Root path is not a directory: " << root_dir;
-            return nullptr;
-        } else if (fsdir.empty()) {
-            LOG(INFO) << "FSDIR cannot be empty";
-            return nullptr;
-        }
-
-        fs::path root_path(root_dir);
-
         std::string real_fsdir = "moon_" + fsdir;
 #ifdef USE_3FS
         bool is_3fs_dir = fs::exists(root_path / "3fs-virt") &&
@@ -384,7 +372,21 @@ class StorageBackend {
      * @param quota_bytes Quota for the storage backend
      * @return tl::expected<void, ErrorCode> indicating operation status.
      */
-    tl::expected<void, ErrorCode> Init(uint64_t quota_bytes);
+    tl::expected<void, ErrorCode> Init(uint64_t quota_bytes = 0);
+
+    /**
+     * @brief Initialize storage backend with external memory for NDS.
+     *
+     * Uses caller-provided memory as the NDS arena. The caller retains ownership
+     * of the memory and is responsible for its lifetime. The memory must be
+     * at least 4096-byte aligned.
+     *
+     * @param nds_mem_addr External memory address for NDS arena
+     * @param nds_mem_size Size of the external memory region
+     * @return tl::expected<void, ErrorCode> indicating operation status.
+     */
+    tl::expected<void, ErrorCode> InitWithMemory(void* nds_mem_addr,
+                                                   uint64_t nds_mem_size);
 
     /**
      * @brief Evict files for satisfying quota limitation
@@ -498,6 +500,7 @@ class StorageBackend {
         true};  // User-configurable flag to enable/disable eviction
     bool use_uring_{false};  // Use io_uring for file I/O
     bool use_nds_{false};    // Use NDS KV storage backend
+    bool owns_nds_memory_{false};  // Whether this instance owns (allocated) the NDS memory
     void* nds_mem_addr_ = nullptr;  // NDS memory arena address
     uint64_t nds_mem_size_ = 0;     // NDS memory arena size
 

@@ -463,7 +463,8 @@ std::optional<std::shared_ptr<Client>> Client::Create(
     const std::string& protocol, const std::optional<std::string>& device_names,
     const std::string& master_server_entry,
     const std::shared_ptr<TransferEngine>& transfer_engine,
-    std::map<std::string, std::string> labels) {
+    std::map<std::string, std::string> labels,
+    void* nds_mem_addr, uint64_t nds_mem_size) {
     auto client = std::shared_ptr<Client>(
         new Client(local_hostname, metadata_connstring, protocol, labels));
 
@@ -494,7 +495,7 @@ std::optional<std::shared_ptr<Client>> Client::Create(
                 LOG(INFO) << "Fs subdir is: " << fs_subdir;
                 // Initialize storage backend with default eviction settings
                 client->PrepareStorageBackend(storage_root_dir, fs_subdir, true,
-                                              0);
+                                              0, nds_mem_addr, nds_mem_size);
             } else {
                 LOG(ERROR) << "Invalid fsdir format: " << dir_string;
             }
@@ -515,14 +516,37 @@ std::optional<std::shared_ptr<Client>> Client::Create(
                 LOG(INFO) << "Disk eviction enabled: "
                           << config.enable_disk_eviction;
                 LOG(INFO) << "Quota bytes: " << config.quota_bytes;
-                // Initialize storage backend with config from master
                 client->PrepareStorageBackend(storage_root_dir, fs_subdir,
                                               config.enable_disk_eviction,
-                                              config.quota_bytes);
+                                              config.quota_bytes,
+                                              nds_mem_addr, nds_mem_size);
             } else {
                 LOG(ERROR) << "Invalid fsdir format: " << config.fsdir;
             }
         }
+    }
+
+    const char* nds_library_path = std::getenv("NDS_LIBRARY_PATH");
+    if (nds_library_path && !client->storage_backend_) {
+        LOG(INFO) << "NDS_LIBRARY_PATH is set but storage backend was not "
+                     "initialized from master config. Initializing NDS backend "
+                     "with default settings.";
+        std::string nds_root_dir = "/tmp/mooncake_nds";
+        std::string nds_fs_subdir = "nds_data";
+        uint64_t nds_quota_bytes = 0;
+        const char* nds_mem_size_env = std::getenv("MC_NDS_MEM_SIZE");
+        if (nds_mem_size_env) {
+            try {
+                nds_quota_bytes = std::stoull(nds_mem_size_env);
+            } catch (...) {
+                LOG(ERROR) << "Invalid MC_NDS_MEM_SIZE value: " << nds_mem_size_env;
+                nds_quota_bytes = 0;
+            }
+        } else if (config_response) {
+            nds_quota_bytes = config_response.value().quota_bytes;
+        }
+        client->PrepareStorageBackend(nds_root_dir, nds_fs_subdir, true,
+                                      nds_quota_bytes, nds_mem_addr, nds_mem_size);
     }
 
     // this only performs RPC calls
@@ -685,9 +709,10 @@ tl::expected<std::vector<std::string>, ErrorCode> Client::BatchReplicaClear(
 tl::expected<void, ErrorCode> Client::Get(const std::string& object_key,
                                           const QueryResult& query_result,
                                           std::vector<Slice>& slices) {
-    // Find the first complete replica
+    // Find the best complete replica
     Replica::Descriptor replica;
-    ErrorCode err = FindFirstCompleteReplica(query_result.replicas, replica);
+    ErrorCode err = FindFirstCompleteReplica(query_result.replicas, replica,
+                                             storage_backend_ != nullptr);
     if (err != ErrorCode::OK) {
         if (err == ErrorCode::INVALID_REPLICA) {
             LOG(ERROR) << "no_complete_replicas_found key=" << object_key;
@@ -805,7 +830,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGetWhenPreferSameNode(
                 continue;
             }
             Replica::Descriptor replica;
-            ErrorCode err = FindFirstCompleteReplica(replica_list, replica);
+            ErrorCode err = FindFirstCompleteReplica(replica_list, replica, true);
             if (err != ErrorCode::OK) {
                 results[i] = tl::unexpected(err);
                 resolved[i] = true;
@@ -1014,7 +1039,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
 
             Replica::Descriptor replica;
             ErrorCode err =
-                FindFirstCompleteReplica(query_result.replicas, replica);
+                FindFirstCompleteReplica(query_result.replicas, replica, true);
             if (err != ErrorCode::OK) {
                 if (err == ErrorCode::INVALID_REPLICA) {
                     LOG(ERROR) << "no_complete_replicas_found key=" << key;
@@ -2250,17 +2275,24 @@ tl::expected<void, ErrorCode> Client::MarkTaskToComplete(
 
 void Client::PrepareStorageBackend(const std::string& storage_root_dir,
                                    const std::string& fsdir,
-                                   bool enable_eviction, uint64_t quota_bytes) {
-    // Initialize storage backend
+                                   bool enable_eviction, uint64_t quota_bytes,
+                                   void* nds_mem_addr, uint64_t nds_mem_size) {
     storage_backend_ =
         StorageBackend::Create(storage_root_dir, fsdir, enable_eviction);
     if (!storage_backend_) {
-        LOG(INFO) << "Failed to initialize storage backend";
+        LOG(ERROR) << "Failed to create storage backend";
+        return;
     }
-    auto init_result = storage_backend_->Init(quota_bytes);
+    tl::expected<void, ErrorCode> init_result;
+    if (nds_mem_addr) {
+        init_result = storage_backend_->InitWithMemory(nds_mem_addr, nds_mem_size);
+    } else {
+        init_result = storage_backend_->Init(quota_bytes);
+    }
     if (!init_result) {
         LOG(ERROR) << "Failed to initialize StorageBackend. Error: "
                    << init_result.error() << ". The backend will be unusable.";
+        storage_backend_.reset();
     }
 }
 
@@ -2728,8 +2760,17 @@ void Client::PingThreadMain(std::string current_master_address) {
 
 ErrorCode Client::FindFirstCompleteReplica(
     const std::vector<Replica::Descriptor>& replica_list,
-    Replica::Descriptor& replica) {
-    // Find the first complete replica
+    Replica::Descriptor& replica, bool prefer_disk) {
+    if (prefer_disk) {
+        for (size_t i = 0; i < replica_list.size(); ++i) {
+            if (replica_list[i].status == ReplicaStatus::COMPLETE &&
+                replica_list[i].is_disk_replica()) {
+                replica = replica_list[i];
+                return ErrorCode::OK;
+            }
+        }
+    }
+
     for (size_t i = 0; i < replica_list.size(); ++i) {
         if (replica_list[i].status == ReplicaStatus::COMPLETE) {
             replica = replica_list[i];
@@ -2737,7 +2778,6 @@ ErrorCode Client::FindFirstCompleteReplica(
         }
     }
 
-    // No complete replica found
     return ErrorCode::INVALID_REPLICA;
 }
 

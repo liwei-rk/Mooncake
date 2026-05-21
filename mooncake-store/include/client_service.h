@@ -81,7 +81,9 @@ class Client {
         const std::optional<std::string>& device_names = std::nullopt,
         const std::string& master_server_entry = kDefaultMasterAddress,
         const std::shared_ptr<TransferEngine>& transfer_engine = nullptr,
-        std::map<std::string, std::string> labels = {});
+        std::map<std::string, std::string> labels = {},
+        void* nds_mem_addr = nullptr,
+        uint64_t nds_mem_size = 0);
 
     /**
      * @brief Retrieves data for a given key
@@ -509,7 +511,9 @@ class Client {
     void PrepareStorageBackend(const std::string& storage_root_dir,
                                const std::string& fsdir,
                                bool enable_eviction = true,
-                               uint64_t quota_bytes = 0);
+                               uint64_t quota_bytes = 0,
+                               void* nds_mem_addr = nullptr,
+                               uint64_t nds_mem_size = 0);
 
     void PutToLocalFile(const std::string& object_key,
                         const std::vector<Slice>& slices,
@@ -586,15 +590,18 @@ class Client {
                             const Replica::Descriptor& replica);
 
     /**
-     * @brief Find the first complete replica from a replica list
+     * @brief Find a complete replica from a replica list
      * @param replica_list List of replicas to search through
-     * @param replica the first complete replica (file or memory)
+     * @param replica the found complete replica (file or memory)
+     * @param prefer_disk When true, prefer disk replica over memory replica.
+     *                    Searches for COMPLETE disk replicas first, then falls
+     *                    back to any COMPLETE replica.
      * @return ErrorCode::OK if found, ErrorCode::INVALID_REPLICA if no complete
      * replica
      */
     ErrorCode FindFirstCompleteReplica(
         const std::vector<Replica::Descriptor>& replica_list,
-        Replica::Descriptor& replica);
+        Replica::Descriptor& replica, bool prefer_disk = false);
 
     /**
      * @brief Batch put helper methods for structured approach
