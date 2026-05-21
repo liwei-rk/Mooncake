@@ -11,6 +11,10 @@
 #include <string>
 #include <vector>
 
+#ifdef __linux__
+#include <dlfcn.h>
+#endif
+
 #include "file_interface.h"
 #include "mutex.h"
 #include "offset_allocator/offset_allocator.hpp"
@@ -421,6 +425,16 @@ class StorageBackend {
         const std::string& key = "");
 
     /**
+     * @brief Batch-store multiple objects via NDS::batchPut
+     * @param keys Vector of object keys
+     * @param batched_slices Vector of slice vectors (one per key)
+     * @return tl::expected with evicted keys on success, ErrorCode on failure
+     */
+    tl::expected<std::vector<std::string>, ErrorCode> StoreObjects(
+        const std::vector<std::string>& keys,
+        const std::vector<std::vector<Slice>>& batched_slices);
+
+    /**
      * @brief Loads an object into slices
      * @param path path for the object
      * @param slices Output vector for loaded data slices
@@ -430,6 +444,19 @@ class StorageBackend {
     tl::expected<void, ErrorCode> LoadObject(const std::string& path,
                                              std::vector<Slice>& slices,
                                              int64_t length);
+
+    /**
+     * @brief Batch-loads multiple objects using NDS::batchGet for efficient
+     * NVMe reads.
+     * @param keys Vector of object keys (one per object)
+     * @param batched_slices Vector of slice vectors (one per object)
+     * @return tl::expected<void, ErrorCode> indicating operation status.
+     *         On success, all objects were loaded.
+     *         On failure, no objects were loaded (all-or-nothing for NDS).
+     */
+    tl::expected<void, ErrorCode> LoadObjects(
+        const std::vector<std::string>& keys,
+        const std::vector<std::vector<Slice>>& batched_slices);
 
     /**
      * @brief Loads an object as a string
@@ -470,6 +497,9 @@ class StorageBackend {
     bool enable_eviction_{
         true};  // User-configurable flag to enable/disable eviction
     bool use_uring_{false};  // Use io_uring for file I/O
+    bool use_nds_{false};    // Use NDS KV storage backend
+    void* nds_mem_addr_ = nullptr;  // NDS memory arena address
+    uint64_t nds_mem_size_ = 0;     // NDS memory arena size
 
 #ifdef USE_3FS
     bool is_3fs_dir_{false};  // Flag to indicate if the storage is using 3FS

@@ -702,6 +702,36 @@ tl::expected<void, ErrorCode> Client::Get(const std::string& object_key,
     }
 
     auto t0_get = std::chrono::steady_clock::now();
+
+    // Handle disk replica via NDS (synchronous batch path, mirrors Put)
+    if (replica.is_disk_replica() && storage_backend_) {
+        auto disk_descriptor = replica.get_disk_descriptor();
+        auto results = GetBatchFromLocalFile(
+            {object_key}, {slices}, {disk_descriptor});
+        if (results[0].has_value()) {
+            LOG(ERROR) << "Disk load failed for key " << object_key
+                       << ": " << toString(results[0].value());
+            return tl::unexpected(results[0].value());
+        }
+
+        auto us_get = std::chrono::duration_cast<std::chrono::microseconds>(
+                          std::chrono::steady_clock::now() - t0_get)
+                          .count();
+        if (metrics_) {
+            metrics_->transfer_metric.get_latency_us.observe(us_get);
+        }
+
+        if (query_result.IsLeaseExpired()) {
+            LOG(WARNING) << "lease_expired_before_data_transfer_completed key="
+                         << object_key;
+            return tl::unexpected(ErrorCode::LEASE_EXPIRED);
+        }
+
+        VLOG(1) << "Get completed from disk: key=" << object_key;
+        return {};
+    }
+
+    // Handle memory replica via TransferSubmitter
     err = TransferRead(replica, slices);
 
     // Release the cache block after transfer completes (memcpy is done)
@@ -756,9 +786,59 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGetWhenPreferSameNode(
     std::unordered_map<std::string, std::vector<Slice>>& slices) {
     std::vector<tl::expected<void, ErrorCode>> results;
     results.resize(object_keys.size());
+    std::vector<bool> resolved(object_keys.size(), false);
 
+    // === Phase 1: Collect and batch disk replicas via NDS ===
+    if (storage_backend_) {
+        std::vector<size_t> disk_op_indices;
+        std::vector<std::string> disk_keys;
+        std::vector<std::vector<Slice>> disk_slices;
+        std::vector<DiskDescriptor> disk_descriptors;
+
+        for (size_t i = 0; i < object_keys.size(); ++i) {
+            const auto& key = object_keys[i];
+            const auto& replica_list = query_results[i].replicas;
+            auto slices_it = slices.find(key);
+            if (slices_it == slices.end()) {
+                results[i] = tl::unexpected(ErrorCode::INVALID_PARAMS);
+                resolved[i] = true;
+                continue;
+            }
+            Replica::Descriptor replica;
+            ErrorCode err = FindFirstCompleteReplica(replica_list, replica);
+            if (err != ErrorCode::OK) {
+                results[i] = tl::unexpected(err);
+                resolved[i] = true;
+                continue;
+            }
+            if (replica.is_disk_replica()) {
+                disk_op_indices.push_back(i);
+                disk_keys.push_back(key);
+                disk_slices.push_back(slices_it->second);
+                disk_descriptors.push_back(replica.get_disk_descriptor());
+            }
+        }
+
+        if (!disk_keys.empty()) {
+            auto batch_results = GetBatchFromLocalFile(
+                disk_keys, disk_slices, disk_descriptors);
+            for (size_t j = 0; j < disk_op_indices.size(); ++j) {
+                size_t idx = disk_op_indices[j];
+                if (batch_results[j].has_value()) {
+                    results[idx] = tl::unexpected(batch_results[j].value());
+                } else {
+                    results[idx] = {};
+                }
+                resolved[idx] = true;
+            }
+        }
+    }
+
+    // === Phase 2: Group memory replicas by segment and batch transfer ===
     std::unordered_map<std::string, BatchGetOperation> seg_to_op_map{};
     for (size_t i = 0; i < object_keys.size(); ++i) {
+        if (resolved[i]) continue;
+
         const auto& key = object_keys[i];
         const auto& replica_list = query_results[i].replicas;
         auto slices_it = slices.find(key);
@@ -777,6 +857,8 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGetWhenPreferSameNode(
             continue;
         }
         if (!replica.is_memory_replica()) {
+            LOG(ERROR) << "Disk replica without storage backend for key: "
+                       << key;
             results[i] = tl::unexpected(ErrorCode::INVALID_REPLICA);
             continue;
         }
@@ -905,25 +987,79 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
                            Replica::Descriptor, bool>>
         pending_transfers;
     std::vector<tl::expected<void, ErrorCode>> results(object_keys.size());
+    std::vector<bool> resolved(object_keys.size(), false);
     // Record batch get transfer latency (Submit + Wait)
     auto t0_batch_get = std::chrono::steady_clock::now();
 
     // Collect cache hit statistics for the entire batch
     size_t total_cache_hits = 0;
 
-    // Submit all transfers in parallel
+    // === Phase 1: Collect all disk-bound operations, batch them via NDS ===
+    if (storage_backend_) {
+        std::vector<size_t> disk_op_indices;
+        std::vector<std::string> disk_keys;
+        std::vector<std::vector<Slice>> disk_slices;
+        std::vector<DiskDescriptor> disk_descriptors;
+
+        for (size_t i = 0; i < object_keys.size(); ++i) {
+            const auto& key = object_keys[i];
+            const auto& query_result = query_results[i];
+
+            auto slices_it = slices.find(key);
+            if (slices_it == slices.end()) {
+                results[i] = tl::unexpected(ErrorCode::INVALID_PARAMS);
+                resolved[i] = true;
+                continue;
+            }
+
+            Replica::Descriptor replica;
+            ErrorCode err =
+                FindFirstCompleteReplica(query_result.replicas, replica);
+            if (err != ErrorCode::OK) {
+                if (err == ErrorCode::INVALID_REPLICA) {
+                    LOG(ERROR) << "no_complete_replicas_found key=" << key;
+                }
+                results[i] = tl::unexpected(err);
+                resolved[i] = true;
+                continue;
+            }
+
+            if (replica.is_disk_replica()) {
+                disk_op_indices.push_back(i);
+                disk_keys.push_back(key);
+                disk_slices.push_back(slices_it->second);
+                disk_descriptors.push_back(replica.get_disk_descriptor());
+            }
+        }
+
+        if (!disk_keys.empty()) {
+            auto batch_results = GetBatchFromLocalFile(
+                disk_keys, disk_slices, disk_descriptors);
+            for (size_t j = 0; j < disk_op_indices.size(); ++j) {
+                size_t idx = disk_op_indices[j];
+                if (batch_results[j].has_value()) {
+                    results[idx] = tl::unexpected(batch_results[j].value());
+                } else {
+                    results[idx] = {};
+                }
+                resolved[idx] = true;
+            }
+        }
+    }
+
+    // === Phase 2: Submit memory transfers ===
     for (size_t i = 0; i < object_keys.size(); ++i) {
+        if (resolved[i]) continue;
+
         const auto& key = object_keys[i];
         const auto& query_result = query_results[i];
 
         auto slices_it = slices.find(key);
         if (slices_it == slices.end()) {
-            LOG(ERROR) << "Slices not found for key: " << key;
             results[i] = tl::unexpected(ErrorCode::INVALID_PARAMS);
             continue;
         }
 
-        // Find the first complete replica for this key
         Replica::Descriptor replica;
         ErrorCode err =
             FindFirstCompleteReplica(query_result.replicas, replica);
@@ -1089,9 +1225,13 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
              it != start_result.value().rend(); ++it) {
             const auto& replica = *it;
             if (replica.is_disk_replica()) {
-                // Store to local file if storage backend is available
                 auto disk_descriptor = replica.get_disk_descriptor();
-                PutToLocalFile(key, slices, disk_descriptor);
+                auto results = PutBatchToLocalFile(
+                    {key}, {{slices}}, {disk_descriptor});
+                if (results[0].has_value()) {
+                    LOG(ERROR) << "Disk storage failed for key " << key
+                               << ": " << toString(results[0].value());
+                }
                 break;  // Only one disk replica is needed
             }
         }
@@ -1264,6 +1404,43 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
         return;
     }
 
+    // === Phase 1: Collect all disk-bound operations, batch them ===
+    if (storage_backend_) {
+        std::vector<size_t> disk_op_indices;
+        std::vector<std::string> disk_keys;
+        std::vector<std::vector<Slice>> disk_slices;
+        std::vector<DiskDescriptor> disk_descriptors;
+
+        for (size_t i = 0; i < ops.size(); ++i) {
+            auto& op = ops[i];
+            if (op.IsResolved() || op.replicas.empty()) continue;
+
+            for (auto it = op.replicas.rbegin(); it != op.replicas.rend();
+                 ++it) {
+                if (it->is_disk_replica()) {
+                    disk_op_indices.push_back(i);
+                    disk_keys.push_back(op.key);
+                    disk_slices.push_back(op.slices);
+                    disk_descriptors.push_back(it->get_disk_descriptor());
+                    break;  // Only one disk replica is needed
+                }
+            }
+        }
+
+        if (!disk_keys.empty()) {
+            auto batch_results = PutBatchToLocalFile(
+                disk_keys, disk_slices, disk_descriptors);
+            for (size_t j = 0; j < disk_op_indices.size(); ++j) {
+                if (batch_results[j].has_value()) {
+                    ops[disk_op_indices[j]].SetError(
+                        batch_results[j].value(),
+                        "Disk storage batch failed");
+                }
+            }
+        }
+    }
+
+    // === Phase 2: Submit memory transfers ===
     for (auto& op : ops) {
         // Skip operations that already failed in previous stages
         if (op.IsResolved()) {
@@ -1279,20 +1456,6 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
 
         bool all_transfers_submitted = true;
         std::string failure_context;
-
-        // We must deal with disk replica first, then the disk putrevoke/putend
-        // can be called surely
-        if (storage_backend_) {
-            for (auto it = op.replicas.rbegin(); it != op.replicas.rend();
-                 ++it) {
-                const auto& replica = *it;
-                if (replica.is_disk_replica()) {
-                    auto disk_descriptor = replica.get_disk_descriptor();
-                    PutToLocalFile(op.key, op.slices, disk_descriptor);
-                    break;  // Only one disk replica is needed
-                }
-            }
-        }
 
         for (size_t replica_idx = 0; replica_idx < op.replicas.size();
              ++replica_idx) {
@@ -2162,6 +2325,87 @@ void Client::PutToLocalFile(const std::string& key,
             LOG(ERROR) << "Failed to end put operation for key: " << key;
         }
     });
+}
+
+std::vector<std::optional<ErrorCode>> Client::PutBatchToLocalFile(
+    const std::vector<std::string>& keys,
+    const std::vector<std::vector<Slice>>& batched_slices,
+    const std::vector<DiskDescriptor>& disk_descriptors) {
+
+    size_t n = keys.size();
+    std::vector<std::optional<ErrorCode>> results(n);
+
+    if (!storage_backend_ || n == 0) return results;
+
+    // 1. Batch I/O via NDS::batchPut
+    auto store_result = storage_backend_->StoreObjects(keys, batched_slices);
+
+    if (!store_result) {
+        LOG(ERROR) << "StoreObjects batch failed: "
+                   << toString(store_result.error()) << " for " << n
+                   << " keys";
+
+        auto revoke_responses = master_client_.BatchPutRevoke(keys);
+        for (size_t i = 0; i < n; ++i) {
+            results[i] = store_result.error();
+        }
+        return results;
+    }
+
+    // 2. Notify master about evicted disk replicas (if any)
+    const auto& evicted_keys = store_result.value();
+    if (!evicted_keys.empty()) {
+        auto evict_responses = master_client_.BatchEvictDiskReplica(
+            evicted_keys, ReplicaType::DISK);
+        for (size_t i = 0; i < evict_responses.size(); ++i) {
+            if (!evict_responses[i]) {
+                LOG(WARNING)
+                    << "Failed to notify master about evicted key: "
+                    << evicted_keys[i]
+                    << ", error: " << evict_responses[i].error();
+            }
+        }
+    }
+
+    // 3. Disk PutEnd for each key (uses ReplicaType::DISK so must be
+    //    per-key; BatchPutEnd lacks the ReplicaType parameter).
+    for (size_t i = 0; i < n; ++i) {
+        auto end_result =
+            master_client_.PutEnd(keys[i], ReplicaType::DISK);
+        if (!end_result) {
+            LOG(ERROR) << "PutEnd(DISK) failed for key " << keys[i]
+                       << ": " << toString(end_result.error());
+            results[i] = end_result.error();
+        }
+    }
+
+    return results;
+}
+
+std::vector<std::optional<ErrorCode>> Client::GetBatchFromLocalFile(
+    const std::vector<std::string>& keys,
+    const std::vector<std::vector<Slice>>& batched_slices,
+    const std::vector<DiskDescriptor>& disk_descriptors) {
+
+    size_t n = keys.size();
+    std::vector<std::optional<ErrorCode>> results(n);
+
+    if (!storage_backend_ || n == 0) return results;
+
+    auto load_result = storage_backend_->LoadObjects(keys, batched_slices);
+
+    if (!load_result) {
+        LOG(ERROR) << "LoadObjects batch failed: "
+                   << toString(load_result.error()) << " for " << n
+                   << " keys";
+        for (size_t i = 0; i < n; ++i) {
+            results[i] = load_result.error();
+        }
+        return results;
+    }
+
+    VLOG(0) << "Successfully loaded " << n << " objects from NDS";
+    return results;
 }
 
 ErrorCode Client::TransferData(const Replica::Descriptor& replica_descriptor,
