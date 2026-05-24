@@ -11,6 +11,7 @@ set(MOONCAKE_STORE_SOURCES
     utils.cpp
     master_metric_manager.cpp
     storage_backend.cpp
+    kv_storage_backend.cpp
     thread_pool.cpp
     etcd_helper.cpp
     segment.cpp

@@ -933,6 +933,16 @@ std::vector<tl::expected<void, ErrorCode>> MasterService::BatchPutEnd(
     return results;
 }
 
+std::vector<tl::expected<void, ErrorCode>> MasterService::BatchPutEndDisk(
+    const UUID& client_id, const std::vector<std::string>& keys) {
+    std::vector<tl::expected<void, ErrorCode>> results;
+    results.reserve(keys.size());
+    for (const auto& key : keys) {
+        results.emplace_back(PutEnd(client_id, key, ReplicaType::DISK));
+    }
+    return results;
+}
+
 std::vector<tl::expected<void, ErrorCode>> MasterService::BatchPutRevoke(
     const UUID& client_id, const std::vector<std::string>& keys) {
     std::vector<tl::expected<void, ErrorCode>> results;

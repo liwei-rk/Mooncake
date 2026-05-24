@@ -103,6 +103,8 @@ class OperationState {
  */
 class EmptyOperationState : public OperationState {
    public:
+    EmptyOperationState() { result_ = ErrorCode::OK; }
+
     bool is_completed() override { return true; }
 
     void wait_for_completion() override {}
@@ -212,9 +214,11 @@ class TransferFuture {
    public:
     explicit TransferFuture(std::shared_ptr<OperationState> state);
 
-    // Non-copyable but movable
-    TransferFuture(const TransferFuture&) = delete;
-    TransferFuture& operator=(const TransferFuture&) = delete;
+    TransferFuture(const TransferFuture& other) : state_(other.state_) {}
+    TransferFuture& operator=(const TransferFuture& other) {
+        state_ = other.state_;
+        return *this;
+    }
     TransferFuture(TransferFuture&&) = default;
     TransferFuture& operator=(TransferFuture&&) = default;
 
@@ -427,6 +431,15 @@ class TransferSubmitter {
         const AllocatedBuffer::Descriptor& handle,
         const std::vector<Slice>& slices,
         const TransferRequest::OpCode op_code);
+
+    /**
+     * @brief Submit batched memcpy operations asynchronously for local
+     * transfers
+     */
+    std::optional<TransferFuture> submitBatchMemcpyOperation(
+        const std::vector<Replica::Descriptor>& replicas,
+        const std::vector<std::vector<Slice>>& all_slices,
+        TransferRequest::OpCode op_code);
 
     /**
      * @brief Submit transfer engine operation asynchronously
