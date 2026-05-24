@@ -11,10 +11,6 @@
 #include <string>
 #include <vector>
 
-#ifdef __linux__
-#include <dlfcn.h>
-#endif
-
 #include "file_interface.h"
 #include "mutex.h"
 #include "offset_allocator/offset_allocator.hpp"
@@ -283,8 +279,22 @@ class StorageBackendInterface {
     FileStorageConfig file_storage_config_;
 };
 
+/**
+ * @class StorageBackend
+ * @brief Implementation of StorageBackend interface using local filesystem
+ * storage.
+ *
+ * Provides thread-safe operations for storing and retrieving objects in a
+ * directory hierarchy.
+ */
 class StorageBackend {
    public:
+/**
+ * @brief Constructs a new StorageBackend instance
+ * @param root_dir Root directory path for object storage
+ * @param fsdir  subdirectory name
+ * @note Directory existence is not checked in constructor
+ */
 #ifdef USE_3FS
     explicit StorageBackend(const std::string& root_dir,
                             const std::string& fsdir, bool is_3fs_dir,
@@ -307,9 +317,48 @@ class StorageBackend {
           enable_eviction_(enable_eviction) {}
 #endif
 
-    virtual ~StorageBackend();
+    /**
+     * @brief Factory method to create a StorageBackend instance
+     * @param root_dir Root directory path for object storage
+     * @param fsdir  subdirectory name
+     * @param enable_eviction Whether to enable disk eviction feature (default:
+     * true) Note: Eviction is automatically disabled for 3FS mode
+     * @return shared_ptr to new instance or nullptr if directory is invalid
+     *
+     * Performs validation of the root directory before creating the instance:
+     * - Verifies directory exists
+     * - Verifies path is actually a directory
+     */
+    static std::shared_ptr<StorageBackend> Create(const std::string& root_dir,
+                                                  const std::string& fsdir,
+                                                  bool enable_eviction = true) {
+        namespace fs = std::filesystem;
+        if (!fs::exists(root_dir)) {
+            LOG(INFO) << "Root directory does not exist: " << root_dir;
+            return nullptr;
+        } else if (!fs::is_directory(root_dir)) {
+            LOG(INFO) << "Root path is not a directory: " << root_dir;
+            return nullptr;
+        } else if (fsdir.empty()) {
+            LOG(INFO) << "FSDIR cannot be empty";
+            return nullptr;
+        }
 
-/**
+        fs::path root_path(root_dir);
+
+        std::string real_fsdir = "moon_" + fsdir;
+#ifdef USE_3FS
+        bool is_3fs_dir = fs::exists(root_path / "3fs-virt") &&
+                          fs::is_directory(root_path / "3fs-virt");
+        return std::make_shared<StorageBackend>(root_dir, real_fsdir,
+                                                is_3fs_dir, enable_eviction);
+#else
+        return std::make_shared<StorageBackend>(root_dir, real_fsdir,
+                                                enable_eviction);
+#endif
+    }
+
+    /**
      * @brief Initializes the storage backend.
      *
      * This method scans the storage directory to build its internal state.
@@ -331,9 +380,7 @@ class StorageBackend {
      * @param quota_bytes Quota for the storage backend
      * @return tl::expected<void, ErrorCode> indicating operation status.
      */
-    virtual tl::expected<void, ErrorCode> Init(uint64_t quota_bytes = 0,
-                                           void* nds_mem_addr = nullptr,
-                                           uint64_t nds_mem_size = 0);
+    tl::expected<void, ErrorCode> Init(uint64_t quota_bytes);
 
     /**
      * @brief Evict files for satisfying quota limitation
@@ -347,7 +394,7 @@ class StorageBackend {
      * @param slices Vector of data slices to store
      * @return tl::expected<void, ErrorCode> indicating operation status
      */
-    virtual tl::expected<std::vector<std::string>, ErrorCode> StoreObject(
+    tl::expected<std::vector<std::string>, ErrorCode> StoreObject(
         const std::string& path, const std::vector<Slice>& slices,
         const std::string& key = "");
 
@@ -380,7 +427,7 @@ class StorageBackend {
      * @param length Expected length of data to read
      * @return tl::expected<void, ErrorCode> indicating operation status
      */
-virtual tl::expected<void, ErrorCode> LoadObject(const std::string& path,
+    tl::expected<void, ErrorCode> LoadObject(const std::string& path,
                                              std::vector<Slice>& slices,
                                              int64_t length);
 
@@ -430,7 +477,7 @@ virtual tl::expected<void, ErrorCode> LoadObject(const std::string& path,
     std::unique_ptr<USRBIOResourceManager> resource_manager_;
 #endif
 
-   protected:
+   private:
     // File write queue for disk eviction - tracks files in FIFO order
     std::list<FileRecord> file_write_queue_;
     std::unordered_map<std::string, std::list<FileRecord>::iterator>
@@ -445,7 +492,7 @@ virtual tl::expected<void, ErrorCode> LoadObject(const std::string& path,
     uint64_t used_space_ = 0;       // Used storage space in bytes
     uint64_t available_space_ = 0;  // Available storage space in bytes
 
-std::atomic<bool> initialized_{false};
+    std::atomic<bool> initialized_{false};
 
     /**
      * @brief Make sure the path is valid and create necessary directories
@@ -737,14 +784,11 @@ class BucketStorageBackend : public StorageBackendInterface {
     /**
      * @brief Checks whether the backend is allowed to continue offloading.
      * @return tl::expected<bool, ErrorCode>
-     * - On success: true 表示可以继续 offload；false 表示达到上限/不允许继续。
-     * - On failure: 返回错误码（例如 IO/内部错误）。
-     */
+     * - On success: true 琛ㄧず鍙互缁х画 offload锛沠alse 琛ㄧず杈惧埌涓婇檺/涓嶅厑璁哥户缁€?     * - On failure: 杩斿洖閿欒鐮侊紙渚嬪 IO/鍐呴儴閿欒锛夈€?     */
     tl::expected<bool, ErrorCode> IsEnableOffloading() override;
 
     /**
-     * @brief 根据后端 bucket 限制（keys/size）将 offloading_objects 分桶。
-     * @param offloading_objects Input map of object keys and their sizes
+     * @brief 鏍规嵁鍚庣 bucket 闄愬埗锛坘eys/size锛夊皢 offloading_objects 鍒嗘《銆?     * @param offloading_objects Input map of object keys and their sizes
      * (bytes).
      * @param buckets_keys Output: bucketized keys; each inner vector is a
      * bucket.
@@ -933,7 +977,7 @@ class BucketStorageBackend : public StorageBackendInterface {
     std::map<int64_t, std::shared_ptr<BucketMetadata>> GUARDED_BY(
         mutex_) buckets_;
     // LRU eviction index: ordered set of {last_access_ns_, bucket_id}.
-    // Maintained lazily — reads update last_access_ns_ atomically without
+    // Maintained lazily 鈥?reads update last_access_ns_ atomically without
     // touching this index; SelectEvictionCandidate() repairs stale entries.
     std::set<std::pair<int64_t, int64_t>> GUARDED_BY(mutex_) lru_index_;
     int64_t GUARDED_BY(mutex_) next_bucket_ = -1;
@@ -1130,7 +1174,7 @@ class OffsetAllocatorStorageBackend : public StorageBackendInterface {
 
     // Maps key to shard index [0, kNumShards) using hash. Same key always maps
     // to same shard. Uses bitwise AND instead of modulo (%) for speed: hash &
-    // (kNumShards-1) ≡ hash % kNumShards This optimization only works when
+    // (kNumShards-1) 鈮?hash % kNumShards This optimization only works when
     // kNumShards is a power of 2 (enforced by static_assert)
     inline size_t ShardForKey(const std::string& key) const {
         return std::hash<std::string>{}(key) & (kNumShards - 1);
@@ -1175,31 +1219,5 @@ class OffsetAllocatorStorageBackend : public StorageBackendInterface {
 
 tl::expected<std::shared_ptr<StorageBackendInterface>, ErrorCode>
 CreateStorageBackend(const FileStorageConfig& config);
-
-class KVStorageBackend : public StorageBackend {
-   public:
-    explicit KVStorageBackend(const std::string& root_dir,
-                              const std::string& fsdir,
-                              bool enable_eviction = true)
-        : StorageBackend(root_dir, fsdir, enable_eviction) {}
-
-    ~KVStorageBackend() override;
-
-    tl::expected<void, ErrorCode> Init(uint64_t quota_bytes,
-                                       void* nds_mem_addr,
-                                       uint64_t nds_mem_size) override;
-
-    tl::expected<std::vector<std::string>, ErrorCode> StoreObject(
-        const std::string& path, const std::vector<Slice>& slices,
-        const std::string& key = "") override;
-
-    tl::expected<void, ErrorCode> LoadObject(const std::string& path,
-                                             std::vector<Slice>& slices,
-                                             int64_t length) override;
-
-    bool owns_nds_memory_{false};
-    void* nds_mem_addr_ = nullptr;
-    uint64_t nds_mem_size_ = 0;
-};
 
 }  // namespace mooncake

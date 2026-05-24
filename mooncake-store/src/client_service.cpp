@@ -496,8 +496,7 @@ std::optional<std::shared_ptr<Client>> Client::Create(
                 LOG(INFO) << "Fs subdir is: " << fs_subdir;
                 // Initialize storage backend with default eviction settings
                 client->PrepareStorageBackend(storage_root_dir, fs_subdir, true,
-                                              0, false,
-                                              nds_mem_addr, nds_mem_size);
+                                              0, nds_mem_addr, nds_mem_size);
             } else {
                 LOG(ERROR) << "Invalid fsdir format: " << dir_string;
             }
@@ -518,11 +517,11 @@ std::optional<std::shared_ptr<Client>> Client::Create(
                 LOG(INFO) << "Disk eviction enabled: "
                           << config.enable_disk_eviction;
                 LOG(INFO) << "Quota bytes: " << config.quota_bytes;
+                client->use_od_ = config.use_od;
                 LOG(INFO) << "Use OD: " << config.use_od;
                 client->PrepareStorageBackend(storage_root_dir, fs_subdir,
                                               config.enable_disk_eviction,
                                               config.quota_bytes,
-                                              config.use_od,
                                               nds_mem_addr, nds_mem_size);
             } else {
                 LOG(ERROR) << "Invalid fsdir format: " << config.fsdir;
@@ -2255,9 +2254,11 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
 
 tl::expected<void, ErrorCode> Client::Remove(const ObjectKey& key, bool force) {
     auto result = master_client_.Remove(key, force);
-    // if (storage_backend_) {
-    //     storage_backend_->RemoveFile(key);
-    // }
+    if (use_od_) {
+        if (kv_storage_backend_) kv_storage_backend_->Remove(key);
+    } else {
+        if (storage_backend_) storage_backend_->RemoveFile(key);
+    }
     if (!result) {
         return tl::unexpected(result.error());
     }
@@ -2267,9 +2268,11 @@ tl::expected<void, ErrorCode> Client::Remove(const ObjectKey& key, bool force) {
 tl::expected<long, ErrorCode> Client::RemoveByRegex(const ObjectKey& str,
                                                     bool force) {
     auto result = master_client_.RemoveByRegex(str, force);
-    // if (storage_backend_) {
-    //     storage_backend_->RemoveByRegex(str);
-    // }
+    if (use_od_) {
+        if (kv_storage_backend_) kv_storage_backend_->RemoveByRegex(str);
+    } else {
+        if (storage_backend_) storage_backend_->RemoveByRegex(str);
+    }
     if (!result) {
         return tl::unexpected(result.error());
     }
@@ -2277,9 +2280,11 @@ tl::expected<long, ErrorCode> Client::RemoveByRegex(const ObjectKey& str,
 }
 
 tl::expected<long, ErrorCode> Client::RemoveAll(bool force) {
-    // if (storage_backend_) {
-    //     storage_backend_->RemoveAll();
-    // }
+    if (use_od_) {
+        if (kv_storage_backend_) kv_storage_backend_->RemoveAll();
+    } else {
+        if (storage_backend_) storage_backend_->RemoveAll();
+    }
     return master_client_.RemoveAll(force);
 }
 
@@ -2694,12 +2699,16 @@ tl::expected<void, ErrorCode> Client::MarkTaskToComplete(
 void Client::PrepareStorageBackend(const std::string& storage_root_dir,
                                    const std::string& fsdir,
                                    bool enable_eviction, uint64_t quota_bytes,
-                                   bool use_od,
                                    void* nds_mem_addr, uint64_t nds_mem_size) {
     std::string real_fsdir = "moon_" + fsdir;
-    if (use_od) {
-        storage_backend_ = std::make_shared<KVStorageBackend>(
-            storage_root_dir, real_fsdir, enable_eviction);
+    if (use_od_) {
+        kv_storage_backend_ = std::make_shared<KVStorageBackend>();
+        auto init_result = kv_storage_backend_->Init(nds_mem_addr, nds_mem_size);
+        if (!init_result) {
+            LOG(ERROR) << "Failed to initialize KVStorageBackend. Error: "
+                       << init_result.error() << ". The backend will be unusable.";
+            kv_storage_backend_.reset();
+        }
     } else {
 #ifdef USE_3FS
         std::filesystem::path root_path(storage_root_dir);
@@ -2711,80 +2720,17 @@ void Client::PrepareStorageBackend(const std::string& storage_root_dir,
         storage_backend_ = std::make_shared<StorageBackend>(
             storage_root_dir, real_fsdir, enable_eviction);
 #endif
-    }
-    if (!storage_backend_) {
-        LOG(ERROR) << "Failed to create storage backend";
-        return;
-    }
-    auto init_result = storage_backend_->Init(quota_bytes, nds_mem_addr, nds_mem_size);
-    if (!init_result) {
-        LOG(ERROR) << "Failed to initialize StorageBackend. Error: "
-                   << init_result.error() << ". The backend will be unusable.";
-        storage_backend_.reset();
-    }
-}
-
-void Client::PutToLocalFile(const std::string& key,
-                            const std::vector<Slice>& slices,
-                            const DiskDescriptor& disk_descriptor) {
-    if (!storage_backend_) return;
-
-    size_t total_size = 0;
-    for (const auto& slice : slices) {
-        total_size += slice.size;
-    }
-
-    std::string path = disk_descriptor.file_path;
-    // Currently, persistence is achieved through asynchronous writes, but
-    // before asynchronous writing in 3FS, significant performance degradation
-    // may occur due to data copying. Profiling reveals that the number of page
-    // faults triggered in this scenario is nearly double the normal count.
-    // Future plans include introducing a reuse buffer list to address this
-    // performance degradation issue.
-
-    std::string value;
-    value.reserve(total_size);
-    for (const auto& slice : slices) {
-        value.append(static_cast<char*>(slice.ptr), slice.size);
-    }
-
-    write_thread_pool_.enqueue([this, backend = storage_backend_, key,
-                                value = std::move(value), path] {
-        // Store the object
-        auto store_result = backend->StoreObject(path, value, key);
-        ReplicaType replica_type = ReplicaType::DISK;
-
-        if (!store_result) {
-            // If storage failed, revoke the put operation
-            LOG(ERROR) << "Failed to store object for key: " << key;
-            auto revoke_result = master_client_.PutRevoke(key, replica_type);
-            if (!revoke_result) {
-                LOG(ERROR) << "Failed to revoke put operation for key: " << key;
-            }
+        if (!storage_backend_) {
+            LOG(ERROR) << "Failed to create storage backend";
             return;
         }
-
-        // Notify master about any evicted disk replicas (batch)
-        if (!store_result.value().empty()) {
-            const auto& evicted_keys = store_result.value();
-            auto evict_results = master_client_.BatchEvictDiskReplica(
-                evicted_keys, replica_type);
-            for (size_t i = 0; i < evict_results.size(); ++i) {
-                if (!evict_results[i]) {
-                    LOG(WARNING)
-                        << "Failed to notify master about evicted key: "
-                        << evicted_keys[i]
-                        << ", error: " << evict_results[i].error();
-                }
-            }
+        auto init_result = storage_backend_->Init(quota_bytes);
+        if (!init_result) {
+            LOG(ERROR) << "Failed to initialize StorageBackend. Error: "
+                       << init_result.error() << ". The backend will be unusable.";
+            storage_backend_.reset();
         }
-
-        // If storage succeeded, end the put operation
-        auto end_result = master_client_.PutEnd(key, replica_type);
-        if (!end_result) {
-            LOG(ERROR) << "Failed to end put operation for key: " << key;
-        }
-    });
+    }
 }
 
 std::vector<std::optional<ErrorCode>> Client::PutBatchToLocalFile(
@@ -2794,6 +2740,25 @@ std::vector<std::optional<ErrorCode>> Client::PutBatchToLocalFile(
 
     size_t n = keys.size();
     std::vector<std::optional<ErrorCode>> results(n);
+
+    if (use_od_) {
+        if (!kv_storage_backend_ || n == 0) return results;
+        auto store_result = kv_storage_backend_->StoreObjects(keys, batched_slices);
+        if (!store_result) {
+            LOG(ERROR) << "StoreObjects failed: " << toString(store_result.error());
+            for (size_t i = 0; i < n; ++i) results[i] = store_result.error();
+            return results;
+        }
+        for (size_t i = 0; i < n; ++i) {
+            auto end_result = master_client_.PutEnd(keys[i], ReplicaType::DISK);
+            if (!end_result) {
+                LOG(ERROR) << "PutEnd(DISK) failed for key " << keys[i]
+                           << ": " << toString(end_result.error());
+                results[i] = end_result.error();
+            }
+        }
+        return results;
+    }
 
     if (!storage_backend_ || n == 0) return results;
 
@@ -2842,6 +2807,16 @@ std::vector<std::optional<ErrorCode>> Client::GetBatchFromLocalFile(
 
     size_t n = keys.size();
     std::vector<std::optional<ErrorCode>> results(n);
+
+    if (use_od_) {
+        if (!kv_storage_backend_ || n == 0) return results;
+        auto load_result = kv_storage_backend_->LoadObjects(keys, batched_slices);
+        if (!load_result) {
+            LOG(ERROR) << "LoadObjects failed: " << toString(load_result.error());
+            for (size_t i = 0; i < n; ++i) results[i] = load_result.error();
+        }
+        return results;
+    }
 
     if (!storage_backend_ || n == 0) return results;
 
