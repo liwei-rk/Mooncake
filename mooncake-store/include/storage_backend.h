@@ -283,22 +283,8 @@ class StorageBackendInterface {
     FileStorageConfig file_storage_config_;
 };
 
-/**
- * @class StorageBackend
- * @brief Implementation of StorageBackend interface using local filesystem
- * storage.
- *
- * Provides thread-safe operations for storing and retrieving objects in a
- * directory hierarchy.
- */
 class StorageBackend {
    public:
-/**
- * @brief Constructs a new StorageBackend instance
- * @param root_dir Root directory path for object storage
- * @param fsdir  subdirectory name
- * @note Directory existence is not checked in constructor
- */
 #ifdef USE_3FS
     explicit StorageBackend(const std::string& root_dir,
                             const std::string& fsdir, bool is_3fs_dir,
@@ -321,36 +307,9 @@ class StorageBackend {
           enable_eviction_(enable_eviction) {}
 #endif
 
-    ~StorageBackend();
+    virtual ~StorageBackend();
 
-    /**
-     * @brief Factory method to create a StorageBackend instance
-     * @param root_dir Root directory path for object storage
-     * @param fsdir  subdirectory name
-     * @param enable_eviction Whether to enable disk eviction feature (default:
-     * true) Note: Eviction is automatically disabled for 3FS mode
-     * @return shared_ptr to new instance or nullptr if directory is invalid
-     *
-     * Performs validation of the root directory before creating the instance:
-     * - Verifies directory exists
-     * - Verifies path is actually a directory
-     */
-    static std::shared_ptr<StorageBackend> Create(const std::string& root_dir,
-                                                  const std::string& fsdir,
-                                                  bool enable_eviction = true) {
-        std::string real_fsdir = "moon_" + fsdir;
-#ifdef USE_3FS
-        bool is_3fs_dir = fs::exists(root_path / "3fs-virt") &&
-                          fs::is_directory(root_path / "3fs-virt");
-        return std::make_shared<StorageBackend>(root_dir, real_fsdir,
-                                                is_3fs_dir, enable_eviction);
-#else
-        return std::make_shared<StorageBackend>(root_dir, real_fsdir,
-                                                enable_eviction);
-#endif
-    }
-
-    /**
+/**
      * @brief Initializes the storage backend.
      *
      * This method scans the storage directory to build its internal state.
@@ -372,21 +331,9 @@ class StorageBackend {
      * @param quota_bytes Quota for the storage backend
      * @return tl::expected<void, ErrorCode> indicating operation status.
      */
-    tl::expected<void, ErrorCode> Init(uint64_t quota_bytes = 0);
-
-    /**
-     * @brief Initialize storage backend with external memory for NDS.
-     *
-     * Uses caller-provided memory as the NDS arena. The caller retains ownership
-     * of the memory and is responsible for its lifetime. The memory must be
-     * at least 4096-byte aligned.
-     *
-     * @param nds_mem_addr External memory address for NDS arena
-     * @param nds_mem_size Size of the external memory region
-     * @return tl::expected<void, ErrorCode> indicating operation status.
-     */
-    tl::expected<void, ErrorCode> InitWithMemory(void* nds_mem_addr,
-                                                   uint64_t nds_mem_size);
+    virtual tl::expected<void, ErrorCode> Init(uint64_t quota_bytes = 0,
+                                           void* nds_mem_addr = nullptr,
+                                           uint64_t nds_mem_size = 0);
 
     /**
      * @brief Evict files for satisfying quota limitation
@@ -400,7 +347,7 @@ class StorageBackend {
      * @param slices Vector of data slices to store
      * @return tl::expected<void, ErrorCode> indicating operation status
      */
-    tl::expected<std::vector<std::string>, ErrorCode> StoreObject(
+    virtual tl::expected<std::vector<std::string>, ErrorCode> StoreObject(
         const std::string& path, const std::vector<Slice>& slices,
         const std::string& key = "");
 
@@ -427,38 +374,15 @@ class StorageBackend {
         const std::string& key = "");
 
     /**
-     * @brief Batch-store multiple objects via NDS::batchPut
-     * @param keys Vector of object keys
-     * @param batched_slices Vector of slice vectors (one per key)
-     * @return tl::expected with evicted keys on success, ErrorCode on failure
-     */
-    tl::expected<std::vector<std::string>, ErrorCode> StoreObjects(
-        const std::vector<std::string>& keys,
-        const std::vector<std::vector<Slice>>& batched_slices);
-
-    /**
      * @brief Loads an object into slices
      * @param path path for the object
      * @param slices Output vector for loaded data slices
      * @param length Expected length of data to read
      * @return tl::expected<void, ErrorCode> indicating operation status
      */
-    tl::expected<void, ErrorCode> LoadObject(const std::string& path,
+virtual tl::expected<void, ErrorCode> LoadObject(const std::string& path,
                                              std::vector<Slice>& slices,
                                              int64_t length);
-
-    /**
-     * @brief Batch-loads multiple objects using NDS::batchGet for efficient
-     * NVMe reads.
-     * @param keys Vector of object keys (one per object)
-     * @param batched_slices Vector of slice vectors (one per object)
-     * @return tl::expected<void, ErrorCode> indicating operation status.
-     *         On success, all objects were loaded.
-     *         On failure, no objects were loaded (all-or-nothing for NDS).
-     */
-    tl::expected<void, ErrorCode> LoadObjects(
-        const std::vector<std::string>& keys,
-        const std::vector<std::vector<Slice>>& batched_slices);
 
     /**
      * @brief Loads an object as a string
@@ -499,10 +423,6 @@ class StorageBackend {
     bool enable_eviction_{
         true};  // User-configurable flag to enable/disable eviction
     bool use_uring_{false};  // Use io_uring for file I/O
-    bool use_nds_{false};    // Use NDS KV storage backend
-    bool owns_nds_memory_{false};  // Whether this instance owns (allocated) the NDS memory
-    void* nds_mem_addr_ = nullptr;  // NDS memory arena address
-    uint64_t nds_mem_size_ = 0;     // NDS memory arena size
 
 #ifdef USE_3FS
     bool is_3fs_dir_{false};  // Flag to indicate if the storage is using 3FS
@@ -510,7 +430,7 @@ class StorageBackend {
     std::unique_ptr<USRBIOResourceManager> resource_manager_;
 #endif
 
-   private:
+   protected:
     // File write queue for disk eviction - tracks files in FIFO order
     std::list<FileRecord> file_write_queue_;
     std::unordered_map<std::string, std::list<FileRecord>::iterator>
@@ -525,7 +445,7 @@ class StorageBackend {
     uint64_t used_space_ = 0;       // Used storage space in bytes
     uint64_t available_space_ = 0;  // Available storage space in bytes
 
-    std::atomic<bool> initialized_{false};
+std::atomic<bool> initialized_{false};
 
     /**
      * @brief Make sure the path is valid and create necessary directories
@@ -1255,5 +1175,31 @@ class OffsetAllocatorStorageBackend : public StorageBackendInterface {
 
 tl::expected<std::shared_ptr<StorageBackendInterface>, ErrorCode>
 CreateStorageBackend(const FileStorageConfig& config);
+
+class KVStorageBackend : public StorageBackend {
+   public:
+    explicit KVStorageBackend(const std::string& root_dir,
+                              const std::string& fsdir,
+                              bool enable_eviction = true)
+        : StorageBackend(root_dir, fsdir, enable_eviction) {}
+
+    ~KVStorageBackend() override;
+
+    tl::expected<void, ErrorCode> Init(uint64_t quota_bytes,
+                                       void* nds_mem_addr,
+                                       uint64_t nds_mem_size) override;
+
+    tl::expected<std::vector<std::string>, ErrorCode> StoreObject(
+        const std::string& path, const std::vector<Slice>& slices,
+        const std::string& key = "") override;
+
+    tl::expected<void, ErrorCode> LoadObject(const std::string& path,
+                                             std::vector<Slice>& slices,
+                                             int64_t length) override;
+
+    bool owns_nds_memory_{false};
+    void* nds_mem_addr_ = nullptr;
+    uint64_t nds_mem_size_ = 0;
+};
 
 }  // namespace mooncake

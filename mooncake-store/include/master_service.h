@@ -1037,6 +1037,7 @@ class MasterService {
     // storage backend eviction configuration
     const bool enable_disk_eviction_;
     const uint64_t quota_bytes_;
+    const bool use_od_;
 
     bool use_disk_replica_{false};
 

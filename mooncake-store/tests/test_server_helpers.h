@@ -96,6 +96,9 @@ class InProcMaster {
             if (config.quota_bytes.has_value()) {
                 wms_cfg.quota_bytes = config.quota_bytes.value();
             }
+            if (config.use_od.has_value()) {
+                wms_cfg.use_od = config.use_od.value();
+            }
 
             wms_cfg.enable_cxl = config.enable_cxl.has_value()
                                      ? config.enable_cxl.value()

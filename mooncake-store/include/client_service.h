@@ -508,20 +508,21 @@ class Client {
     /**
      * @brief Prepare and use the storage backend for persisting data
      */
-    void PrepareStorageBackend(const std::string& storage_root_dir,
-                               const std::string& fsdir,
-                               bool enable_eviction = true,
-                               uint64_t quota_bytes = 0,
-                               void* nds_mem_addr = nullptr,
-                               uint64_t nds_mem_size = 0);
+void PrepareStorageBackend(const std::string& storage_root_dir,
+                                const std::string& fsdir,
+                                bool enable_eviction = true,
+                                uint64_t quota_bytes = 0,
+                                bool use_od = false,
+                                void* nds_mem_addr = nullptr,
+                                uint64_t nds_mem_size = 0);
 
     void PutToLocalFile(const std::string& object_key,
                         const std::vector<Slice>& slices,
                         const DiskDescriptor& disk_descriptor);
 
     /**
-     * @brief Batch-store objects to local disk via NDS::batchPut.
-     * Handles serialization, StorageBackend::StoreObjects call, and batch
+     * @brief Batch-store objects to local disk.
+     * Handles StorageBackend::StoreObject call, and batch
      * master RPCs (PutEnd/PutRevoke/EvictDiskReplica). Call is synchronous.
      * @param keys Object keys to store
      * @param batched_slices Data slices for each key
@@ -534,8 +535,8 @@ class Client {
         const std::vector<DiskDescriptor>& disk_descriptors);
 
     /**
-     * @brief Batch-load objects from local disk via NDS::batchGet.
-     * Handles StorageBackend::LoadObjects call. Call is synchronous.
+     * @brief Batch-load objects from local disk.
+     * Handles StorageBackend::LoadObject call. Call is synchronous.
      * @param keys Object keys to load
      * @param batched_slices Data slices for each key (output buffers)
      * @param disk_descriptors Disk descriptors for each key

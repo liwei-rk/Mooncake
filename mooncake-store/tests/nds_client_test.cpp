@@ -56,6 +56,7 @@ class NdsClientTest : public ::testing::Test {
         auto config = InProcMasterConfigBuilder()
                           .set_root_fs_dir(tmp_dir_.string())
                           .set_enable_disk_eviction(true)
+                          .set_use_od(true)
                           .build();
         ASSERT_TRUE(master_.Start(config));
         master_address_ = master_.master_address();
