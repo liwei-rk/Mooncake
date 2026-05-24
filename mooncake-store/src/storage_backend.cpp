@@ -3276,8 +3276,6 @@ CreateStorageBackend(const FileStorageConfig& config) {
     }
 }
 
-}
-
 KVStorageBackend::~KVStorageBackend() {
     if (nds_mem_addr_ && owns_nds_memory_) {
         LOG(INFO) << "Cleaning up KV storage backend memory";
