@@ -956,6 +956,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGetWhenPreferSameNode(
 
     // === Phase 2: Disk replicas fallback ===
     if (HasDiskStorage()) {
+        std::vector<size_t> disk_op_indices;
         std::vector<std::string> disk_keys;
         std::vector<std::vector<Slice>> disk_slices;
         std::vector<DiskDescriptor> disk_descriptors;
@@ -1005,6 +1006,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGetWhenPreferSameNode(
 #else  // StorageBackend-first mode: Phase 1 = disk, Phase 2 = memory
     // === Phase 1: Collect and batch disk replicas via StorageBackend ===
     if (HasDiskStorage()) {
+        std::vector<size_t> disk_op_indices;
         std::vector<std::string> disk_keys;
         std::vector<std::vector<Slice>> disk_slices;
         std::vector<DiskDescriptor> disk_descriptors;
@@ -1280,6 +1282,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
 
     // === Phase 2: Disk replicas fallback ===
     if (HasDiskStorage()) {
+        std::vector<size_t> disk_op_indices;
         std::vector<std::string> disk_keys;
         std::vector<std::vector<Slice>> disk_slices;
         std::vector<DiskDescriptor> disk_descriptors;
@@ -1331,6 +1334,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
 #else  // StorageBackend-first mode: Phase 1 = disk, Phase 2 = memory
     // === Phase 1: Collect all disk-bound operations, batch them ===
     if (HasDiskStorage()) {
+        std::vector<size_t> disk_op_indices;
         std::vector<std::string> disk_keys;
         std::vector<std::vector<Slice>> disk_slices;
         std::vector<DiskDescriptor> disk_descriptors;
@@ -1807,6 +1811,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
 
     // === Phase 2: Collect disk-bound operations, batch them ===
     if (HasDiskStorage()) {
+        std::vector<size_t> disk_op_indices;
         std::vector<std::string> disk_keys;
         std::vector<std::vector<Slice>> disk_slices;
         std::vector<DiskDescriptor> disk_descriptors;
@@ -1842,6 +1847,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
 #else  // StorageBackend-first mode: disk first, memory second
     // === Phase 1: Collect all disk-bound operations, batch them ===
     if (HasDiskStorage()) {
+        std::vector<size_t> disk_op_indices;
         std::vector<std::string> disk_keys;
         std::vector<std::vector<Slice>> disk_slices;
         std::vector<DiskDescriptor> disk_descriptors;
