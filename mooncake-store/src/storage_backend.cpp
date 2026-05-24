@@ -3381,7 +3381,7 @@ tl::expected<std::vector<std::string>, ErrorCode> KVStorageBackend::StoreObject(
         slice_offset += slice.size;
     }
 
-    VLOG(1) << "[KVStoreObject] key=" << key << " blockId=" << blockId
+    VLOG(INFO) << "[KVStoreObject] key=" << key << " blockId=" << blockId
             << " num_slices=" << blockIds.size();
 
     int32_t result = loader.batchPut(blockIds.data(), blockAddrs.data(),
@@ -3392,7 +3392,7 @@ tl::expected<std::vector<std::string>, ErrorCode> KVStorageBackend::StoreObject(
         return tl::unexpected(ErrorCode::WRITE_FAIL);
     }
 
-    VLOG(1) << "Successfully wrote data to NDS for key: " << key
+    VLOG(INFO) << "Successfully wrote data to NDS for key: " << key
             << " (" << blockIds.size() << " slices)";
     return {};
 }
@@ -3416,7 +3416,7 @@ tl::expected<void, ErrorCode> KVStorageBackend::LoadObject(
         slice_offset += slice.size;
     }
 
-    VLOG(1) << "[KVLoadObject] key=" << path << " blockId=" << blockId
+    VLOG(INFO) << "[KVLoadObject] key=" << path << " blockId=" << blockId
             << " num_slices=" << blockIds.size();
 
     int32_t result = loader.batchGet(blockIds.data(), blockAddrs.data(),
@@ -3427,7 +3427,7 @@ tl::expected<void, ErrorCode> KVStorageBackend::LoadObject(
         return tl::unexpected(ErrorCode::FILE_READ_FAIL);
     }
 
-    VLOG(1) << "Successfully read data from NDS for key: " << path
+    VLOG(INFO) << "Successfully read data from NDS for key: " << path
             << " (" << blockIds.size() << " slices)";
     return {};
 }
