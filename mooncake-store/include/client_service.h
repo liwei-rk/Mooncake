@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <atomic>
 #include <boost/functional/hash.hpp>
@@ -14,6 +14,7 @@
 
 #include "client_metric.h"
 #include "ha/leader_coordinator.h"
+#include "kv_storage_backend.h"
 #include "master_client.h"
 #include "storage_backend.h"
 #include "thread_pool.h"
@@ -480,6 +481,10 @@ class Client {
         return admission_sketch_->increment(key) >= admission_threshold_;
     }
 
+    bool HasDiskStorage() const {
+        return use_od_ ? (kv_storage_backend_ != nullptr) : (storage_backend_ != nullptr);
+    }
+
    private:
     /**
      * @brief Private constructor to enforce creation through Create() method
@@ -509,16 +514,11 @@ class Client {
      * @brief Prepare and use the storage backend for persisting data
      */
 void PrepareStorageBackend(const std::string& storage_root_dir,
-                                const std::string& fsdir,
-                                bool enable_eviction = true,
-                                uint64_t quota_bytes = 0,
-                                bool use_od = false,
-                                void* nds_mem_addr = nullptr,
-                                uint64_t nds_mem_size = 0);
-
-    void PutToLocalFile(const std::string& object_key,
-                        const std::vector<Slice>& slices,
-                        const DiskDescriptor& disk_descriptor);
+                                 const std::string& fsdir,
+                                 bool enable_eviction = true,
+                                 uint64_t quota_bytes = 0,
+                                  void* nds_mem_addr = nullptr,
+                                  uint64_t nds_mem_size = 0);
 
     /**
      * @brief Batch-store objects to local disk.
@@ -648,6 +648,10 @@ void PrepareStorageBackend(const std::string& storage_root_dir,
     // Client persistent thread pool for async operations
     ThreadPool write_thread_pool_;
     std::shared_ptr<StorageBackend> storage_backend_;
+    std::shared_ptr<KVStorageBackend> kv_storage_backend_;
+    bool use_od_{false};
+    
+    
 
     // For high availability
     std::unique_ptr<ha::LeaderCoordinator> leader_coordinator_;

@@ -1,4 +1,6 @@
 #include "storage_backend.h"
+#include "nds/nds_interface.h"
+
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -6,7 +8,6 @@
 #include <sys/uio.h>
 #include <errno.h>
 #include <cstring>
-#include <cstdlib>
 
 #include <regex>
 #include <string>
@@ -16,9 +17,6 @@
 #include <chrono>
 #include <unordered_set>
 
-#include <dlfcn.h>
-
-
 #include <ylt/struct_pb.hpp>
 
 #include "mutex.h"
@@ -27,74 +25,6 @@
 #include <ylt/util/tl/expected.hpp>
 
 namespace mooncake {
-
-namespace {
-
-typedef int32_t (*NDS_init_fn)(void*, uint64_t);
-typedef int32_t (*NDS_isExists_fn)(uint64_t*, int32_t);
-typedef int32_t (*NDS_get_fn)(uint64_t, uint8_t*, size_t, size_t);
-typedef int32_t (*NDS_put_fn)(uint64_t, uint8_t*, size_t, size_t);
-typedef int32_t (*NDS_batchGet_fn)(uint64_t*, uint8_t**, size_t*, size_t*, int32_t);
-typedef int32_t (*NDS_batchPut_fn)(uint64_t*, uint8_t**, size_t*, size_t*, int32_t);
-
-struct NDSLoader {
-    void* handle = nullptr;
-    NDS_init_fn init = nullptr;
-    NDS_isExists_fn isExists = nullptr;
-    NDS_get_fn get = nullptr;
-    NDS_put_fn put = nullptr;
-    NDS_batchGet_fn batchGet = nullptr;
-    NDS_batchPut_fn batchPut = nullptr;
-    bool nds_initialized = false;
-    void* nds_mem_addr = nullptr;
-    uint64_t nds_mem_size = 0;
-
-    static NDSLoader& Instance() {
-        static NDSLoader instance;
-        return instance;
-    }
-
-    bool Load() {
-        if (handle) return true;
-
-        const char* env_path = std::getenv("NDS_LIBRARY_PATH");
-        std::string lib_path = env_path ? env_path : "libndskv.so";
-        
-        handle = dlopen(lib_path.c_str(), RTLD_NOW | RTLD_LOCAL);
-        if (!handle) {
-            LOG(ERROR) << "Failed to load " << lib_path << ": " << dlerror();
-            return false;
-        }
-        
-        init = (NDS_init_fn)dlsym(handle, "init");
-        isExists = (NDS_isExists_fn)dlsym(handle, "isExists");
-        get = (NDS_get_fn)dlsym(handle, "get");
-        put = (NDS_put_fn)dlsym(handle, "put");
-        batchGet = (NDS_batchGet_fn)dlsym(handle, "batchGet");
-        batchPut = (NDS_batchPut_fn)dlsym(handle, "batchPut");
-
-        if (!init || !get || !put || !batchGet || !batchPut) {
-            LOG(ERROR) << "Failed to load NDS functions";
-            dlclose(handle);
-            handle = nullptr;
-            return false;
-        }
-        
-        LOG(INFO) << "Successfully loaded libndskv.so";
-        return true;
-    }
-
-    void Unload() {
-        if (handle) {
-            dlclose(handle);
-            handle = nullptr;
-        }
-    }
-};
-
-}
-
-StorageBackend::~StorageBackend() {}
 
 bool FilePerKeyConfig::Validate() const {
     if (fsdir.empty()) {
@@ -187,9 +117,8 @@ bool StorageBackend::IsEvictionEnabled() const {
 #endif
 }
 
-tl::expected<void, ErrorCode> StorageBackend::Init(uint64_t quota_bytes,
-                                                    void* nds_mem_addr,
-                                                    uint64_t nds_mem_size) {
+tl::expected<void, ErrorCode> StorageBackend::Init(uint64_t quota_bytes = 0) {
+    // Skip eviction initialization for 3FS mode
     if (!IsEvictionEnabled()) {
         initialized_.store(true, std::memory_order_release);
         return {};
@@ -277,6 +206,7 @@ tl::expected<void, ErrorCode> StorageBackend::Init(uint64_t quota_bytes,
         if (total_space_ >= used_space_) {
             RecalculateAvailableSpace();
         } else {
+            // Only enable eviction for local storage, not for 3FS
             if (IsEvictionEnabled()) {
                 eviction_needed = true;
                 available_space_ = -1;
@@ -285,10 +215,11 @@ tl::expected<void, ErrorCode> StorageBackend::Init(uint64_t quota_bytes,
                     << ") exceeds the new quota (" << total_space_
                     << "). Eviction will be triggered after initial setup.";
             } else {
+                // For 3FS mode, just log a warning but don't trigger eviction
                 LOG(WARNING) << "Existing used space (" << used_space_
                              << ") exceeds the new quota (" << total_space_
                              << "). Eviction is disabled for 3FS mode.";
-                RecalculateAvailableSpace();
+                RecalculateAvailableSpace();  // Still calculate available space
             }
         }
     }
@@ -353,14 +284,15 @@ bool StorageBackend::InitQuotaEvict() {
     return true;
 }
 
-
 tl::expected<std::vector<std::string>, ErrorCode> StorageBackend::StoreObject(
-    const std::string& path, const std::vector<Slice>& slices, const std::string& key) {
+    const std::string& path, const std::vector<Slice>& slices,
+    const std::string& key) {
     size_t total_size = 0;
     for (const auto& slice : slices) {
         total_size += slice.size;
     }
 
+    // For eviction-enabled mode, check space and reserve
     std::vector<std::string> evicted_keys;
     uint64_t reserved_size = 0;
     if (IsEvictionEnabled()) {
@@ -379,6 +311,7 @@ tl::expected<std::vector<std::string>, ErrorCode> StorageBackend::StoreObject(
         reserved_size = total_size;
     }
 
+    // Create file and write data (common logic for both modes)
     auto file_result = CreateFileForWriting(path, reserved_size);
     if (!file_result) {
         return tl::make_unexpected(file_result.error());
@@ -390,14 +323,13 @@ tl::expected<std::vector<std::string>, ErrorCode> StorageBackend::StoreObject(
         return tl::make_unexpected(write_result.error());
     }
 
+    // For eviction-enabled mode, add file to tracking queue
     if (IsEvictionEnabled()) {
         AddFileToWriteQueue(path, total_size, key);
     }
 
     return evicted_keys;
 }
-
-
 
 tl::expected<std::vector<std::string>, ErrorCode> StorageBackend::StoreObject(
     const std::string& path, const std::string& str, const std::string& key) {
@@ -1379,7 +1311,7 @@ tl::expected<int64_t, ErrorCode> BucketStorageBackend::BatchOffload(
     }
     auto bucket = build_bucket_result.value();
 
-    // Phase 1: eviction — remove oldest buckets from metadata maps to make
+    // Phase 1: eviction 鈥?remove oldest buckets from metadata maps to make
     // room. Must notify master BEFORE deleting files (Phase 2).
     const int64_t required_size = bucket->data_size + bucket->meta_size;
     PendingEviction pending = PrepareEviction(required_size);
@@ -3274,164 +3206,6 @@ CreateStorageBackend(const FileStorageConfig& config) {
             return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
         }
     }
-}
-
-}
-
-KVStorageBackend::~KVStorageBackend() {
-    if (nds_mem_addr_ && owns_nds_memory_) {
-        LOG(INFO) << "Cleaning up KV storage backend memory";
-        free(nds_mem_addr_);
-        nds_mem_addr_ = nullptr;
-        nds_mem_size_ = 0;
-        owns_nds_memory_ = false;
-        auto& loader = NDSLoader::Instance();
-        loader.nds_initialized = false;
-        loader.nds_mem_addr = nullptr;
-        loader.nds_mem_size = 0;
-    }
-}
-
-tl::expected<void, ErrorCode> KVStorageBackend::Init(uint64_t quota_bytes,
-                                                      void* nds_mem_addr,
-                                                      uint64_t nds_mem_size) {
-    if (initialized_.load(std::memory_order_acquire)) {
-        LOG(WARNING) << "KVStorageBackend is already initialized. Skipping.";
-        return {};
-    }
-
-    bool nds_loaded = NDSLoader::Instance().Load();
-    if (!nds_loaded) {
-        LOG(ERROR) << "KVStorageBackend requires NDS library but failed to load";
-        return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
-    }
-
-    auto& loader = NDSLoader::Instance();
-
-    if (!loader.nds_initialized) {
-        if (nds_mem_addr && nds_mem_size > 0) {
-            nds_mem_addr_ = nds_mem_addr;
-            nds_mem_size_ = nds_mem_size;
-            int32_t result = loader.init(nds_mem_addr_, nds_mem_size_);
-            if (result != 0) {
-                LOG(ERROR) << "Failed to initialize NDS KV storage with external memory: " << result;
-                return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
-            }
-            LOG(INFO) << "NDS KV storage initialized with external memory, size: "
-                      << nds_mem_size_ << " bytes";
-            owns_nds_memory_ = false;
-            loader.nds_initialized = true;
-            loader.nds_mem_addr = nds_mem_addr_;
-            loader.nds_mem_size = nds_mem_size_;
-        } else {
-            nds_mem_size_ = 1024 * 1024 * 1024;
-
-            constexpr size_t kNDSAlignment = 4096;
-            size_t aligned_size =
-                ((nds_mem_size_ + kNDSAlignment - 1) / kNDSAlignment) *
-                kNDSAlignment;
-
-            nds_mem_addr_ = std::aligned_alloc(kNDSAlignment, aligned_size);
-            if (!nds_mem_addr_) {
-                LOG(ERROR) << "Failed to allocate 4096-aligned memory for NDS: "
-                           << aligned_size << " bytes";
-                return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
-            }
-
-            int32_t result = loader.init(nds_mem_addr_, nds_mem_size_);
-            if (result != 0) {
-                LOG(ERROR) << "Failed to initialize NDS KV storage: " << result;
-                free(nds_mem_addr_);
-                nds_mem_addr_ = nullptr;
-                return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
-            }
-
-            LOG(INFO) << "NDS KV storage initialized, size: " << nds_mem_size_
-                      << " bytes";
-            owns_nds_memory_ = true;
-            loader.nds_initialized = true;
-            loader.nds_mem_addr = nds_mem_addr_;
-            loader.nds_mem_size = nds_mem_size_;
-        }
-    } else {
-        nds_mem_addr_ = loader.nds_mem_addr;
-        nds_mem_size_ = loader.nds_mem_size;
-        LOG(INFO) << "NDS KV storage already initialized, reusing existing instance";
-    }
-
-    initialized_.store(true, std::memory_order_release);
-    return {};
-}
-
-tl::expected<std::vector<std::string>, ErrorCode> KVStorageBackend::StoreObject(
-    const std::string& path, const std::vector<Slice>& slices,
-    const std::string& key) {
-    uint64_t blockId = objectKeyToUint64(key);
-    auto& loader = NDSLoader::Instance();
-
-    std::vector<uint64_t> blockIds;
-    std::vector<uint8_t*> blockAddrs;
-    std::vector<size_t> nds_offsets;
-    std::vector<size_t> nds_lengths;
-
-    size_t slice_offset = 0;
-    for (const auto& slice : slices) {
-        blockIds.push_back(blockId);
-        blockAddrs.push_back(reinterpret_cast<uint8_t*>(slice.ptr));
-        nds_offsets.push_back(slice_offset);
-        nds_lengths.push_back(slice.size);
-        slice_offset += slice.size;
-    }
-
-    VLOG(1) << "[KVStoreObject] key=" << key << " blockId=" << blockId
-            << " num_slices=" << blockIds.size();
-
-    int32_t result = loader.batchPut(blockIds.data(), blockAddrs.data(),
-                                     nds_offsets.data(), nds_lengths.data(),
-                                     static_cast<int32_t>(blockIds.size()));
-    if (result != 0) {
-        LOG(ERROR) << "Failed to write data to NDS: " << result;
-        return tl::unexpected(ErrorCode::WRITE_FAIL);
-    }
-
-    VLOG(1) << "Successfully wrote data to NDS for key: " << key
-            << " (" << blockIds.size() << " slices)";
-    return {};
-}
-
-tl::expected<void, ErrorCode> KVStorageBackend::LoadObject(
-    const std::string& path, std::vector<Slice>& slices, int64_t length) {
-    uint64_t blockId = objectKeyToUint64(path);
-    auto& loader = NDSLoader::Instance();
-
-    std::vector<uint64_t> blockIds;
-    std::vector<uint8_t*> blockAddrs;
-    std::vector<size_t> nds_offsets;
-    std::vector<size_t> nds_lengths;
-
-    size_t slice_offset = 0;
-    for (auto& slice : slices) {
-        blockIds.push_back(blockId);
-        blockAddrs.push_back(reinterpret_cast<uint8_t*>(slice.ptr));
-        nds_offsets.push_back(slice_offset);
-        nds_lengths.push_back(slice.size);
-        slice_offset += slice.size;
-    }
-
-    VLOG(1) << "[KVLoadObject] key=" << path << " blockId=" << blockId
-            << " num_slices=" << blockIds.size();
-
-    int32_t result = loader.batchGet(blockIds.data(), blockAddrs.data(),
-                                     nds_offsets.data(), nds_lengths.data(),
-                                     static_cast<int32_t>(blockIds.size()));
-    if (result != 0) {
-        LOG(ERROR) << "Failed to read data from NDS: " << result;
-        return tl::unexpected(ErrorCode::FILE_READ_FAIL);
-    }
-
-    VLOG(1) << "Successfully read data from NDS for key: " << path
-            << " (" << blockIds.size() << " slices)";
-    return {};
 }
 
 }  // namespace mooncake

@@ -477,7 +477,23 @@ std::optional<TransferFuture> TransferSubmitter::submit_batch(
     const std::vector<Replica::Descriptor>& replicas,
     std::vector<std::vector<Slice>>& all_slices,
     TransferRequest::OpCode op_code) {
-    std::optional<TransferFuture> future;
+    if (replicas.empty() || all_slices.empty()) return std::nullopt;
+
+    auto& first_mem_desc = replicas[0].get_memory_descriptor();
+    TransferStrategy strategy =
+        selectStrategy(first_mem_desc.buffer_descriptor, all_slices[0]);
+
+    if (strategy == TransferStrategy::LOCAL_MEMCPY) {
+        auto future =
+            submitBatchMemcpyOperation(replicas, all_slices, op_code);
+        if (future.has_value()) {
+            for (auto& slices : all_slices) {
+                updateTransferMetrics(slices, op_code);
+            }
+        }
+        return future;
+    }
+
     std::vector<TransferRequest> requests;
     for (size_t i = 0; i < replicas.size(); ++i) {
         auto& replica = replicas[i];
@@ -505,8 +521,7 @@ std::optional<TransferFuture> TransferSubmitter::submit_batch(
             offset += slice.size;
         }
     }
-    future = submitTransfer(requests);
-    // Update metrics on successful submission
+    auto future = submitTransfer(requests);
     if (future.has_value()) {
         for (auto& slices : all_slices) {
             updateTransferMetrics(slices, op_code);
@@ -584,6 +599,46 @@ std::optional<TransferFuture> TransferSubmitter::submitMemcpyOperation(
     VLOG(1) << "Memcpy transfer submitted to worker pool with " << slices.size()
             << " operations";
 
+    return TransferFuture(state);
+}
+
+std::optional<TransferFuture> TransferSubmitter::submitBatchMemcpyOperation(
+    const std::vector<Replica::Descriptor>& replicas,
+    const std::vector<std::vector<Slice>>& all_slices,
+    TransferRequest::OpCode op_code) {
+    auto state = std::make_shared<MemcpyOperationState>();
+    std::vector<MemcpyOperation> operations;
+
+    for (size_t i = 0; i < replicas.size(); ++i) {
+        auto& mem_desc = replicas[i].get_memory_descriptor();
+        auto& handle = mem_desc.buffer_descriptor;
+        uint64_t base_address = static_cast<uint64_t>(handle.buffer_address_);
+        uint64_t offset = 0;
+
+        for (size_t j = 0; j < all_slices[i].size(); ++j) {
+            const auto& slice = all_slices[i][j];
+            if (slice.ptr == nullptr) {
+                offset += slice.size;
+                continue;
+            }
+
+            void* dest;
+            const void* src;
+
+            if (op_code == TransferRequest::READ) {
+                dest = slice.ptr;
+                src = reinterpret_cast<const void*>(base_address + offset);
+            } else {
+                dest = reinterpret_cast<void*>(base_address + offset);
+                src = slice.ptr;
+            }
+            offset += slice.size;
+            operations.emplace_back(dest, src, slice.size);
+        }
+    }
+
+    MemcpyTask task(std::move(operations), state);
+    memcpy_pool_->submitTask(std::move(task));
     return TransferFuture(state);
 }
 

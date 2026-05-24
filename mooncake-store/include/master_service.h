@@ -226,6 +226,9 @@ class MasterService {
     std::vector<tl::expected<void, ErrorCode>> BatchPutEnd(
         const UUID& client_id, const std::vector<std::string>& keys);
 
+    std::vector<tl::expected<void, ErrorCode>> BatchPutEndDisk(
+        const UUID& client_id, const std::vector<std::string>& keys);
+
     /**
      * @brief Revoke a batch of put operations
      * @return ErrorCode::OK on success, ErrorCode::OBJECT_NOT_FOUND if not

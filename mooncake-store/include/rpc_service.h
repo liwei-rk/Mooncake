@@ -74,6 +74,9 @@ class WrappedMasterService {
     std::vector<tl::expected<void, ErrorCode>> BatchPutEnd(
         const UUID& client_id, const std::vector<std::string>& keys);
 
+    std::vector<tl::expected<void, ErrorCode>> BatchPutEndDisk(
+        const UUID& client_id, const std::vector<std::string>& keys);
+
     std::vector<tl::expected<void, ErrorCode>> BatchPutRevoke(
         const UUID& client_id, const std::vector<std::string>& keys);
 
