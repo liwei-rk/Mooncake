@@ -744,7 +744,7 @@ tl::expected<void, ErrorCode> Client::Get(const std::string& object_key,
     }
 
     // Disk replica fallback
-    if (replica.is_disk_replica() && storage_backend_) {
+    if (replica.is_disk_replica() && HasDiskStorage()) {
         auto disk_descriptor = replica.get_disk_descriptor();
         auto results = GetBatchFromLocalFile(
             {object_key}, {slices}, {disk_descriptor});
@@ -775,7 +775,7 @@ tl::expected<void, ErrorCode> Client::Get(const std::string& object_key,
 #else  // StorageBackend-first mode: prefer disk replica over memory replica
     Replica::Descriptor replica;
     ErrorCode err = FindFirstCompleteReplica(query_result.replicas, replica,
-                                             storage_backend_ != nullptr);
+                                             HasDiskStorage());
     if (err != ErrorCode::OK) {
         if (err == ErrorCode::INVALID_REPLICA) {
             LOG(ERROR) << "no_complete_replicas_found key=" << object_key;
@@ -790,7 +790,7 @@ tl::expected<void, ErrorCode> Client::Get(const std::string& object_key,
 
     auto t0_get = std::chrono::steady_clock::now();
 
-    if (replica.is_disk_replica() && storage_backend_) {
+    if (replica.is_disk_replica() && HasDiskStorage()) {
         auto disk_descriptor = replica.get_disk_descriptor();
         auto results = GetBatchFromLocalFile(
             {object_key}, {slices}, {disk_descriptor});
@@ -955,8 +955,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGetWhenPreferSameNode(
     }
 
     // === Phase 2: Disk replicas fallback ===
-    if (storage_backend_) {
-        std::vector<size_t> disk_op_indices;
+    if (HasDiskStorage()) {
         std::vector<std::string> disk_keys;
         std::vector<std::vector<Slice>> disk_slices;
         std::vector<DiskDescriptor> disk_descriptors;
@@ -1005,8 +1004,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGetWhenPreferSameNode(
     }
 #else  // StorageBackend-first mode: Phase 1 = disk, Phase 2 = memory
     // === Phase 1: Collect and batch disk replicas via StorageBackend ===
-    if (storage_backend_) {
-        std::vector<size_t> disk_op_indices;
+    if (HasDiskStorage()) {
         std::vector<std::string> disk_keys;
         std::vector<std::vector<Slice>> disk_slices;
         std::vector<DiskDescriptor> disk_descriptors;
@@ -1281,8 +1279,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
     }
 
     // === Phase 2: Disk replicas fallback ===
-    if (storage_backend_) {
-        std::vector<size_t> disk_op_indices;
+    if (HasDiskStorage()) {
         std::vector<std::string> disk_keys;
         std::vector<std::vector<Slice>> disk_slices;
         std::vector<DiskDescriptor> disk_descriptors;
@@ -1333,8 +1330,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
     }
 #else  // StorageBackend-first mode: Phase 1 = disk, Phase 2 = memory
     // === Phase 1: Collect all disk-bound operations, batch them ===
-    if (storage_backend_) {
-        std::vector<size_t> disk_op_indices;
+    if (HasDiskStorage()) {
         std::vector<std::string> disk_keys;
         std::vector<std::vector<Slice>> disk_slices;
         std::vector<DiskDescriptor> disk_descriptors;
@@ -1573,7 +1569,7 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
         }
     }
 
-    if (storage_backend_) {
+    if (HasDiskStorage()) {
         for (auto it = start_result.value().rbegin();
              it != start_result.value().rend(); ++it) {
             const auto& replica = *it;
@@ -1590,7 +1586,7 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
         }
     }
 #else  // StorageBackend-first mode: write disk replica first, memory last
-    if (storage_backend_) {
+    if (HasDiskStorage()) {
         for (auto it = start_result.value().rbegin();
              it != start_result.value().rend(); ++it) {
             const auto& replica = *it;
@@ -1810,8 +1806,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
     }
 
     // === Phase 2: Collect disk-bound operations, batch them ===
-    if (storage_backend_) {
-        std::vector<size_t> disk_op_indices;
+    if (HasDiskStorage()) {
         std::vector<std::string> disk_keys;
         std::vector<std::vector<Slice>> disk_slices;
         std::vector<DiskDescriptor> disk_descriptors;
@@ -1846,8 +1841,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
     }
 #else  // StorageBackend-first mode: disk first, memory second
     // === Phase 1: Collect all disk-bound operations, batch them ===
-    if (storage_backend_) {
-        std::vector<size_t> disk_op_indices;
+    if (HasDiskStorage()) {
         std::vector<std::string> disk_keys;
         std::vector<std::vector<Slice>> disk_slices;
         std::vector<DiskDescriptor> disk_descriptors;

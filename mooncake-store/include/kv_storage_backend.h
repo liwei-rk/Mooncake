@@ -26,7 +26,7 @@ class KVStorageBackend {
         const std::vector<std::string>& keys,
         const std::vector<std::vector<Slice>>& batched_slices);
 
-tl::expected<void, ErrorCode> LoadObjects(
+    tl::expected<void, ErrorCode> LoadObjects(
         const std::vector<std::string>& keys,
         const std::vector<std::vector<Slice>>& batched_slices);
 

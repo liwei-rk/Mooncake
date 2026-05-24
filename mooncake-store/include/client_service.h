@@ -481,6 +481,10 @@ class Client {
         return admission_sketch_->increment(key) >= admission_threshold_;
     }
 
+    bool HasDiskStorage() const {
+        return use_od_ ? (kv_storage_backend_ != nullptr) : (storage_backend_ != nullptr);
+    }
+
    private:
     /**
      * @brief Private constructor to enforce creation through Create() method
