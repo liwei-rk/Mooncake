@@ -476,6 +476,7 @@ def run_stress_test(args):
         print("    4096-aligned? {}".format("YES" if base_addr % 4096 == 0 else "NO"))
 
         pattern = (np.arange(BLOCK_SIZE, dtype=np.uint32) % 251).astype(np.uint8)
+        full_pattern = np.tile(pattern, BATCH_SIZE)
 
         print(">>> Phase II: Setup MooncakeDistributedStore clients")
         for i in range(total_threads):
@@ -501,7 +502,7 @@ def run_stress_test(args):
             thread_buf_start = i * buffer_size_per_thread
             thread_buf_end = thread_buf_start + buffer_size_per_thread
             thread_buf = buf[thread_buf_start:thread_buf_end]
-            thread_buf[:] = pattern
+            thread_buf[:] = full_pattern
             thread_buf_ptr = thread_buf.ctypes.data
 
             retcode = store.register_buffer(thread_buf_ptr, buffer_size_per_thread)
