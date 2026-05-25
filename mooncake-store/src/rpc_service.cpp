@@ -937,18 +937,7 @@ WrappedMasterService::GetStorageConfig() {
     ScopedVLogTimer timer(1, "GetStorageConfig");
     timer.LogRequest("action=get_storage_config");
 
-    LOG(WARNING) << "[DEBUG] WrappedMasterService::GetStorageConfig called, about to invoke master_service_.GetStorageConfig()";
     auto result = master_service_.GetStorageConfig();
-
-    if (result) {
-        auto& config = result.value();
-        LOG(WARNING) << "[DEBUG] GetStorageConfig success: fsdir=" << config.fsdir
-                  << ", enable_disk_eviction=" << config.enable_disk_eviction
-                  << ", quota_bytes=" << config.quota_bytes
-                  << ", use_od=" << config.use_od;
-    } else {
-        LOG(ERROR) << "[DEBUG] GetStorageConfig failed: error=" << toString(result.error());
-    }
 
     timer.LogResponseExpected(result);
     return result;

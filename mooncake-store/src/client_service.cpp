@@ -218,7 +218,6 @@ tl::expected<void, ErrorCode> CheckRegisterMemoryParams(const void* addr,
 }
 
 ErrorCode Client::ConnectToMaster(const std::string& master_server_entry) {
-    LOG(WARNING) << "[DEBUG] ConnectToMaster called with master_server_entry=" << master_server_entry;
     auto ha_backend_spec = ParseHABackendSpec(master_server_entry);
     if (!ha_backend_spec) {
         LOG(ERROR) << "Invalid HA backend entry: " << master_server_entry;
@@ -265,9 +264,7 @@ ErrorCode Client::ConnectToMaster(const std::string& master_server_entry) {
         return ErrorCode::OK;
     } else {
         leader_coordinator_.reset();
-        LOG(WARNING) << "[DEBUG] Non-HA mode, connecting directly to master_server_entry=" << master_server_entry;
         auto err = master_client_.Connect(master_server_entry);
-        LOG(INFO) << "[DEBUG] master_client_.Connect returned: " << toString(err);
         if (err != ErrorCode::OK) {
             return err;
         }
@@ -473,15 +470,12 @@ std::optional<std::shared_ptr<Client>> Client::Create(
         new Client(local_hostname, metadata_connstring, protocol, labels));
 
     ErrorCode err = client->ConnectToMaster(master_server_entry);
-    LOG(WARNING) << "[DEBUG] ConnectToMaster returned: " << toString(err);
     if (err != ErrorCode::OK) {
         return std::nullopt;
     }
 
     // Initialize storage backend if storage_root_dir is valid
-    LOG(WARNING) << "[DEBUG] About to call GetStorageConfig";
     auto config_response = client->master_client_.GetStorageConfig();
-    LOG(WARNING) << "[DEBUG] GetStorageConfig returned, has_value=" << config_response.has_value();
     if (!config_response) {
         LOG(ERROR) << "Failed to get storage config from master: "
                    << toString(config_response.error());
