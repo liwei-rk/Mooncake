@@ -482,6 +482,7 @@ def run_stress_test(args):
         print(">>> Phase II: Setup MooncakeDistributedStore clients")
         mooncake.store.init_glog()
         mooncake.store.set_vlog_level(0)
+        mooncake.store.set_log_to_stderr(True)
         for i in range(total_threads):
             store = MooncakeDistributedStore()
 
