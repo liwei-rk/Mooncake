@@ -3,8 +3,7 @@ import gc
 import mmap
 import numpy as np
 import time
-import threading
-import math
+import multiprocessing
 import sys
 import os
 import subprocess
@@ -24,94 +23,21 @@ MB = 1024**2
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 logger = logging.getLogger(__name__)
 
-stop_event = threading.Event()
-
 OPERATION_MODE = "batch_put"
 BLOCK_SIZE = 128 * 1024
 BATCH_SIZE = 128
-NUM_THREADS = 8
+NUM_WORKERS = 8
 TEST_DURATION = 30
 MONITOR_INTERVAL = 1
 
 GLOBAL_SEGMENT_SIZE_MB = 3200
 LOCAL_BUFFER_SIZE_MB = 512
 
-pre_loaded_keys = []
-
-class ThreadStats:
-    def __init__(self):
-        self.io_count = 0
-        self.total_bytes = 0
-        self.total_latency = 0.0
-        self.success_ops = 0
-        self.error_count = 0
-
-        self.all_io_count = 0
-        self.all_total_bytes = 0
-        self.all_total_latency = 0.0
-        self.all_success_ops = 0
-        self.all_error_count = 0
-
-    def update(self, success, bytes_transferred, latency):
-        self.io_count += 1
-        self.all_io_count += 1
-        self.total_bytes += bytes_transferred
-        self.all_total_bytes += bytes_transferred
-        self.total_latency += latency
-        self.all_total_latency += latency
-
-        if success:
-            self.success_ops += 1
-            self.all_success_ops += 1
-        else:
-            self.error_count += 1
-            self.all_error_count += 1
-
-    def reset_periodic(self):
-        self.io_count = 0
-        self.total_bytes = 0
-        self.total_latency = 0.0
-        self.success_ops = 0
-        self.error_count = 0
-
-
-class GlobalStats:
-    def __init__(self, num_threads):
-        self.start_time = time.time()
-        self.bw_start_time = time.time()
-        self.thread_stats = [ThreadStats() for _ in range(num_threads)]
-
-    def add_batch_stats(self, thread_idx, success, total_size, latency):
-        self.thread_stats[thread_idx].update(success, total_size, latency)
-
-    def get_all_ops(self):
-        return sum(s.all_io_count for s in self.thread_stats)
-
-    def get_all_bytes(self):
-        return sum(s.all_total_bytes for s in self.thread_stats)
-
-    def get_all_errors(self):
-        return sum(s.all_error_count for s in self.thread_stats)
-
-    def get_all_avg_latency(self):
-        total_ops = sum(s.all_io_count for s in self.thread_stats)
-        total_lat = sum(s.all_total_latency for s in self.thread_stats)
-        if total_ops == 0:
-            return 0
-        return total_lat / total_ops
-
-    def snapshot_and_reset(self):
-        elapsed = time.time() - self.bw_start_time
-        total_bytes = sum(s.total_bytes for s in self.thread_stats)
-        total_ops = sum(s.io_count for s in self.thread_stats)
-        total_lat = sum(s.total_latency for s in self.thread_stats)
-        total_errors = sum(s.error_count for s in self.thread_stats)
-        avg_lat = total_lat / total_ops if total_ops > 0 else 0
-        bw = total_bytes / elapsed / GB if elapsed > 0 else 0
-        self.bw_start_time = time.time()
-        for s in self.thread_stats:
-            s.reset_periodic()
-        return bw, avg_lat, total_ops, total_errors
+MSG_BATCH_RESULT = "batch_result"
+MSG_SETUP_OK = "setup_ok"
+MSG_SETUP_FAIL = "setup_fail"
+MSG_WORKER_DONE = "worker_done"
+MSG_WORKER_ERROR = "worker_error"
 
 
 def find_free_port():
@@ -234,28 +160,28 @@ def stop_master(master_proc, master_log_file, master_log_path):
 
 
 def load_keys_from_file(filepath="key.txt"):
-    global pre_loaded_keys
+    keys = []
     print("    Loading block keys from {}...".format(filepath))
     try:
         with open(filepath, "r") as f:
             lines = f.readlines()
             if not lines:
                 raise ValueError("key.txt is empty")
-            pre_loaded_keys = []
             for line in lines:
                 line = line.strip()
                 if line:
-                    pre_loaded_keys.append(line)
-            if not pre_loaded_keys:
+                    keys.append(line)
+            if not keys:
                 raise ValueError("No valid keys found")
-            print("    Successfully loaded {} keys".format(len(pre_loaded_keys)))
+            print("    Successfully loaded {} keys".format(len(keys)))
     except FileNotFoundError:
         print("    Warning: key.txt not found")
     except Exception as e:
         print("    Failed to load keys: {}".format(e))
+    return keys
 
 
-def get_next_batch_keys(current_index, count):
+def get_next_batch_keys(pre_loaded_keys, current_index, count):
     total_keys = len(pre_loaded_keys)
     if total_keys == 0:
         return [], current_index
@@ -267,112 +193,189 @@ def get_next_batch_keys(current_index, count):
     return keys, new_index
 
 
-def batch_put_worker(thread_idx, store, buffer_ptr, block_size, batch_size, global_stats):
+def worker_process(worker_idx, operation_mode, keys, block_size, batch_size,
+                   metadata_url, master_addr, global_segment_size, local_buffer_size,
+                   protocol, device_name, local_hostname_base, test_duration,
+                   stats_queue, stop_event):
+    buffer_size = batch_size * block_size
+
+    mooncake.store.init_glog()
+    mooncake.store.set_vlog_level(0)
+    mooncake.store.set_log_to_stderr(True)
+
+    mm = mmap.mmap(-1, buffer_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+    buf = np.frombuffer(mm, dtype=np.uint8, count=buffer_size)
+    buf_ptr = buf.ctypes.data
+
+    pattern = (np.arange(block_size, dtype=np.uint32) % 251).astype(np.uint8)
+    full_pattern = np.tile(pattern, batch_size)
+    buf[:] = full_pattern
+
+    local_hostname = local_hostname_base
+    if local_hostname.endswith(":0"):
+        local_hostname = local_hostname[:-2] + ":{}".format(find_free_port())
+
+    store = MooncakeDistributedStore()
+    retcode = store.setup(
+        local_hostname,
+        metadata_url,
+        global_segment_size,
+        local_buffer_size,
+        protocol,
+        device_name,
+        master_addr,
+        nds_mem_addr=buf_ptr,
+        nds_mem_size=buffer_size,
+    )
+    if retcode:
+        stats_queue.put((MSG_SETUP_FAIL, worker_idx, retcode))
+        mm.close()
+        return
+
+    retcode = store.register_buffer(buf_ptr, buffer_size)
+    if retcode:
+        stats_queue.put((MSG_SETUP_FAIL, worker_idx, retcode))
+        mm.close()
+        return
+
+    stats_queue.put((MSG_SETUP_OK, worker_idx, 0))
+
     current_key_index = 0
     total_batch_bytes = batch_size * block_size
 
-    while not stop_event.is_set():
-        try:
-            keys, current_key_index = get_next_batch_keys(current_key_index, batch_size)
+    try:
+        while not stop_event.is_set():
+            try:
+                batch_keys, current_key_index = get_next_batch_keys(
+                    keys, current_key_index, batch_size)
 
-            buffer_ptrs = []
-            sizes = []
-            for i in range(len(keys)):
-                offset = i * block_size
-                buffer_ptrs.append(buffer_ptr + offset)
-                sizes.append(block_size)
+                if not batch_keys:
+                    time.sleep(0.01)
+                    continue
 
-            start_time = time.time()
-            ret_codes = store.batch_put_from(keys, buffer_ptrs, sizes)
-            end_time = time.time()
-            latency = end_time - start_time
+                buffer_ptrs = []
+                sizes = []
+                for i in range(len(batch_keys)):
+                    offset = i * block_size
+                    buffer_ptrs.append(buf_ptr + offset)
+                    sizes.append(block_size)
 
-            all_success = all(rc == 0 for rc in ret_codes)
-            global_stats.add_batch_stats(thread_idx, all_success, total_batch_bytes, latency)
+                start_time = time.time()
+                if operation_mode == "batch_put":
+                    ret_codes = store.batch_put_from(batch_keys, buffer_ptrs, sizes)
+                    all_success = all(rc == 0 for rc in ret_codes)
+                else:
+                    ret_codes = store.batch_get_into(batch_keys, buffer_ptrs, sizes)
+                    all_success = all(rc > 0 for rc in ret_codes)
 
-            if not all_success:
-                failed_count = sum(1 for rc in ret_codes if rc != 0)
-                if failed_count > 3:
-                    logger.warning("Thread {} batch_put: {} keys failed".format(
-                        thread_idx, failed_count))
-        except Exception as e:
-            logger.error("Thread {} batch_put exception: {}".format(thread_idx, e))
-            global_stats.add_batch_stats(thread_idx, False, 0, 0)
-            stop_event.set()
+                latency = time.time() - start_time
+                stats_queue.put((MSG_BATCH_RESULT, worker_idx, all_success,
+                                 total_batch_bytes, latency))
 
-
-def batch_get_worker(thread_idx, store, buffer_ptr, block_size, batch_size, global_stats):
-    current_key_index = 0
-    total_batch_bytes = batch_size * block_size
-
-    while not stop_event.is_set():
-        try:
-            keys, current_key_index = get_next_batch_keys(current_key_index, batch_size)
-
-            buffer_ptrs = []
-            sizes = []
-            for i in range(len(keys)):
-                offset = i * block_size
-                buffer_ptrs.append(buffer_ptr + offset)
-                sizes.append(block_size)
-
-            start_time = time.time()
-            ret_codes = store.batch_get_into(keys, buffer_ptrs, sizes)
-            end_time = time.time()
-            latency = end_time - start_time
-
-            all_success = all(rc > 0 for rc in ret_codes)
-            global_stats.add_batch_stats(thread_idx, all_success, total_batch_bytes, latency)
-
-            if not all_success:
-                failed_count = sum(1 for rc in ret_codes if rc <= 0)
-                if failed_count > 3:
-                    logger.warning("Thread {} batch_get: {} keys failed".format(
-                        thread_idx, failed_count))
-        except Exception as e:
-            logger.error("Thread {} batch_get exception: {}".format(thread_idx, e))
-            global_stats.add_batch_stats(thread_idx, False, 0, 0)
-            stop_event.set()
-
-
-def monitor_thread(global_stats):
-    print("    Monitor thread started, reporting every {}s...".format(MONITOR_INTERVAL))
-    while not stop_event.is_set():
-        try:
-            time.sleep(MONITOR_INTERVAL)
-            if stop_event.is_set():
+                if not all_success:
+                    failed_count = sum(1 for rc in ret_codes
+                                       if (operation_mode == "batch_put" and rc != 0)
+                                       or (operation_mode == "batch_get" and rc <= 0))
+                    if failed_count > 3:
+                        logger.warning("Worker {} {}: {} keys failed".format(
+                            worker_idx, operation_mode, failed_count))
+            except Exception as e:
+                logger.error("Worker {} exception: {}".format(worker_idx, e))
+                stats_queue.put((MSG_BATCH_RESULT, worker_idx, False, 0, 0))
                 break
-            elapsed = time.time() - global_stats.start_time
-            bw, avg_lat, total_ops, total_errors = global_stats.snapshot_and_reset()
-
-            error_rate = 0
-            if total_ops > 0:
-                error_rate = total_errors / total_ops * 100
-
-            print("[Monitor] {:6.1f}s - BW: {:5.2f} GB/s, AvgLat: {:.6f}s, "
-                  "Errors: {:3d}, ErrorRate: {:.1f}%".format(
-                      elapsed, bw, avg_lat, total_errors, error_rate))
-        except KeyboardInterrupt:
-            print("    Monitor thread interrupted")
-            stop_event.set()
-            break
-        except Exception as e:
-            print("    Monitor thread exception: {}".format(e))
-            stop_event.set()
-            break
+    finally:
+        try:
+            store.unregister_buffer(buf_ptr)
+        except Exception:
+            pass
+        mm.close()
+        gc.collect()
+        stats_queue.put((MSG_WORKER_DONE, worker_idx, 0))
 
 
-def print_final_report(global_stats, args):
+class GlobalStats:
+    def __init__(self, num_workers):
+        self.start_time = time.time()
+        self.bw_start_time = time.time()
+        self.worker_stats = {}
+        for i in range(num_workers):
+            self.worker_stats[i] = {
+                "io_count": 0, "total_bytes": 0, "total_latency": 0.0,
+                "success_ops": 0, "error_count": 0,
+                "all_io_count": 0, "all_total_bytes": 0,
+                "all_total_latency": 0.0, "all_success_ops": 0, "all_error_count": 0,
+            }
+
+    def add_batch_stats(self, worker_idx, success, bytes_transferred, latency):
+        s = self.worker_stats[worker_idx]
+        s["io_count"] += 1
+        s["all_io_count"] += 1
+        s["total_bytes"] += bytes_transferred
+        s["all_total_bytes"] += bytes_transferred
+        s["total_latency"] += latency
+        s["all_total_latency"] += latency
+        if success:
+            s["success_ops"] += 1
+            s["all_success_ops"] += 1
+        else:
+            s["error_count"] += 1
+            s["all_error_count"] += 1
+
+    def get_all_ops(self):
+        return sum(s["all_io_count"] for s in self.worker_stats.values())
+
+    def get_all_bytes(self):
+        return sum(s["all_total_bytes"] for s in self.worker_stats.values())
+
+    def get_all_errors(self):
+        return sum(s["all_error_count"] for s in self.worker_stats.values())
+
+    def get_all_avg_latency(self):
+        total_ops = sum(s["all_io_count"] for s in self.worker_stats.values())
+        total_lat = sum(s["all_total_latency"] for s in self.worker_stats.values())
+        if total_ops == 0:
+            return 0
+        return total_lat / total_ops
+
+    def snapshot_and_reset(self):
+        elapsed = time.time() - self.bw_start_time
+        total_bytes = sum(s["total_bytes"] for s in self.worker_stats.values())
+        total_ops = sum(s["io_count"] for s in self.worker_stats.values())
+        total_lat = sum(s["total_latency"] for s in self.worker_stats.values())
+        total_errors = sum(s["error_count"] for s in self.worker_stats.values())
+        avg_lat = total_lat / total_ops if total_ops > 0 else 0
+        bw = total_bytes / elapsed / GB if elapsed > 0 else 0
+        self.bw_start_time = time.time()
+        for s in self.worker_stats.values():
+            s["io_count"] = 0
+            s["total_bytes"] = 0
+            s["total_latency"] = 0.0
+            s["success_ops"] = 0
+            s["error_count"] = 0
+        return bw, avg_lat, total_ops, total_errors
+
+    def drain_queue(self, stats_queue):
+        while not stats_queue.empty():
+            try:
+                msg = stats_queue.get_nowait()
+            except Exception:
+                break
+            if msg[0] == MSG_BATCH_RESULT:
+                _, worker_idx, success, total_size, latency = msg
+                self.add_batch_stats(worker_idx, success, total_size, latency)
+
+
+def print_final_report(global_stats, args, keys):
     print("\n" + "=" * 80)
     print("NDS STRESS TEST - FINAL REPORT".center(80))
     print("=" * 80)
     elapsed = time.time() - global_stats.start_time
     print("Test duration:       {:.2f}s".format(elapsed))
-    print("Operation mode:      {}".format(OPERATION_MODE))
+    print("Operation mode:      {}".format(args.operation_mode))
     print("Batch size:          {}".format(args.batch_size))
     print("Block size:          {} ({:.2f} MB)".format(args.block_size, args.block_size / MB))
-    print("Num threads:         {}".format(args.num_threads))
-    print("Keys from key.txt:   {}".format(len(pre_loaded_keys)))
+    print("Num workers:         {}".format(args.num_workers))
+    print("Keys from key.txt:   {}".format(len(keys)))
     print("-" * 80)
 
     total_bytes = global_stats.get_all_bytes()
@@ -402,8 +405,8 @@ def parse_args():
                         help="Size of a single block in bytes")
     parser.add_argument("--batch-size", type=int, default=128,
                         help="Number of keys per batch operation")
-    parser.add_argument("--num-threads", type=int, default=8,
-                        help="Number of worker threads")
+    parser.add_argument("--num-workers", type=int, default=8,
+                        help="Number of worker processes (each gets its own NDS)")
     parser.add_argument("--duration", type=int, default=30,
                         help="Test duration in seconds")
     parser.add_argument("--monitor-interval", type=int, default=1,
@@ -428,28 +431,26 @@ def parse_args():
 
 
 def run_stress_test(args):
-    global OPERATION_MODE, BLOCK_SIZE, BATCH_SIZE, NUM_THREADS, TEST_DURATION, MONITOR_INTERVAL
-
-    OPERATION_MODE = args.operation_mode
-    BLOCK_SIZE = args.block_size
-    BATCH_SIZE = args.batch_size
-    NUM_THREADS = args.num_threads
-    TEST_DURATION = args.duration
-    MONITOR_INTERVAL = args.monitor_interval
+    operation_mode = args.operation_mode
+    block_size = args.block_size
+    batch_size = args.batch_size
+    num_workers = args.num_workers
+    test_duration = args.duration
+    monitor_interval = args.monitor_interval
 
     print("=" * 80)
-    print("NDS STRESS TEST".center(80))
+    print("NDS STRESS TEST (Multi-Process)".center(80))
     print("=" * 80)
-    print("Operation mode:      {}".format(OPERATION_MODE))
-    print("Batch size:          {}".format(BATCH_SIZE))
-    print("Block size:          {} ({:.2f} MB)".format(BLOCK_SIZE, BLOCK_SIZE / MB))
-    print("Num threads:         {}".format(NUM_THREADS))
-    print("Test duration:       {}s".format(TEST_DURATION))
+    print("Operation mode:      {}".format(operation_mode))
+    print("Batch size:          {}".format(batch_size))
+    print("Block size:          {} ({:.2f} MB)".format(block_size, block_size / MB))
+    print("Num workers:         {}".format(num_workers))
+    print("Test duration:       {}s".format(test_duration))
     print("Protocol:            {}".format(args.protocol))
     print("=" * 80)
 
-    load_keys_from_file(args.key_file)
-    if not pre_loaded_keys:
+    keys = load_keys_from_file(args.key_file)
+    if not keys:
         print("ERROR: No keys loaded. Cannot run test.")
         return
 
@@ -457,147 +458,114 @@ def run_stress_test(args):
     master_log_file = None
     master_log_path = None
     master_data_dir = None
-    stores = []
-    registered_ptrs = []
-    mm = None
-    global_stats = None
+
+    stop_event = multiprocessing.Event()
+    stats_queue = multiprocessing.Queue()
+    workers = []
+    global_stats = GlobalStats(num_workers)
 
     try:
         master_proc, master_log_file, master_log_path, rpc_port, http_port, master_data_dir = start_master(args)
         metadata_url = "http://127.0.0.1:{}/metadata".format(http_port)
         master_addr = "127.0.0.1:{}".format(rpc_port)
 
-        total_threads = NUM_THREADS
-        buffer_size_per_thread = BATCH_SIZE * BLOCK_SIZE
-        total_buffer_size = buffer_size_per_thread * total_threads
+        global_segment_size = args.global_segment_size * MB
+        local_buffer_size = args.local_buffer_size * MB
 
-        print(">>> Phase I: Allocate page-aligned buffer ({:.2f} MB total)".format(
-            total_buffer_size / MB))
-        mm = mmap.mmap(-1, total_buffer_size,
-                       flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
-        buf = np.frombuffer(mm, dtype=np.uint8, count=total_buffer_size)
-        base_addr = buf.__array_interface__["data"][0]
-        print("    Buffer base address = 0x{:x}".format(base_addr))
-        print("    4096-aligned? {}".format("YES" if base_addr % 4096 == 0 else "NO"))
+        print(">>> Phase I: Spawn {} worker processes (each with own NDS)".format(num_workers))
+        for i in range(num_workers):
+            worker_mode = operation_mode
+            if operation_mode == "mixed":
+                worker_mode = "batch_put" if i % 2 == 0 else "batch_get"
 
-        pattern = (np.arange(BLOCK_SIZE, dtype=np.uint32) % 251).astype(np.uint8)
-        full_pattern = np.tile(pattern, BATCH_SIZE)
-
-        print(">>> Phase II: Setup MooncakeDistributedStore clients")
-        mooncake.store.init_glog()
-        mooncake.store.set_vlog_level(0)
-        mooncake.store.set_log_to_stderr(True)
-        for i in range(total_threads):
-            store = MooncakeDistributedStore()
-
-            global_segment_size = args.global_segment_size * MB
-            local_buffer_size = args.local_buffer_size * MB
-
-            local_hostname = args.local_hostname
-            if local_hostname.endswith(":0"):
-                local_hostname = local_hostname[:-2] + ":{}".format(
-                    find_free_port())
-
-            thread_buf_start = i * buffer_size_per_thread
-            thread_buf_end = thread_buf_start + buffer_size_per_thread
-            thread_buf = buf[thread_buf_start:thread_buf_end]
-            thread_buf[:] = full_pattern
-            thread_buf_ptr = thread_buf.ctypes.data
-
-            retcode = store.setup(
-                local_hostname,
-                metadata_url,
-                global_segment_size,
-                local_buffer_size,
-                args.protocol,
-                args.device_name,
-                master_addr,
-                nds_mem_addr=thread_buf_ptr,
-                nds_mem_size=buffer_size_per_thread
+            p = multiprocessing.Process(
+                target=worker_process,
+                args=(i, worker_mode, keys, block_size, batch_size,
+                      metadata_url, master_addr,
+                      global_segment_size, local_buffer_size,
+                      args.protocol, args.device_name,
+                      args.local_hostname, test_duration,
+                      stats_queue, stop_event),
+                daemon=True,
             )
+            p.start()
+            workers.append(p)
 
-            if retcode:
-                print("ERROR: Store setup failed for thread {}, retcode={}".format(i, retcode))
-                return
+        setup_ok_count = 0
+        setup_fail_count = 0
+        setup_timeout = time.time() + 30
+        while setup_ok_count + setup_fail_count < num_workers and time.time() < setup_timeout:
+            global_stats.drain_queue(stats_queue)
+            try:
+                msg = stats_queue.get(timeout=0.5)
+            except Exception:
+                continue
+            if msg[0] == MSG_SETUP_OK:
+                setup_ok_count += 1
+                print("    Worker {} setup OK".format(msg[1]))
+            elif msg[0] == MSG_SETUP_FAIL:
+                setup_fail_count += 1
+                print("ERROR: Worker {} setup failed, retcode={}".format(msg[1], msg[2]))
 
-            retcode = store.register_buffer(thread_buf_ptr, buffer_size_per_thread)
-            if retcode:
-                print("ERROR: Buffer registration failed for thread {}, retcode={}".format(
-                    i, retcode))
-                return
-
-            stores.append(store)
-            registered_ptrs.append(thread_buf_ptr)
-            print("    Thread {} client setup + buffer registered OK".format(i))
-
-        print(">>> Phase III: Start monitor and worker threads")
-        global_stats = GlobalStats(total_threads)
-
-        monitor_th = threading.Thread(target=monitor_thread, args=(global_stats,), daemon=True)
-        monitor_th.start()
-
-        worker_threads = []
-        for i in range(total_threads):
-            if OPERATION_MODE == "batch_put":
-                target = batch_put_worker
-            elif OPERATION_MODE == "batch_get":
-                target = batch_get_worker
-            elif OPERATION_MODE == "mixed":
-                target = batch_put_worker if i % 2 == 0 else batch_get_worker
-            else:
-                target = batch_put_worker
-
-            th = threading.Thread(
-                target=target,
-                args=(i, stores[i], registered_ptrs[i], BLOCK_SIZE, BATCH_SIZE, global_stats),
-                daemon=True
-            )
-            th.start()
-            worker_threads.append(th)
-
-        print("    Started {} worker threads + 1 monitor thread".format(total_threads))
-
-        try:
-            start_time = time.time()
-            while time.time() - start_time < TEST_DURATION:
-                if stop_event.is_set():
-                    print("    Detected error, exiting early")
-                    break
-                time.sleep(0.1)
-            print("    Test duration reached, stopping all threads...")
+        if setup_fail_count > 0:
+            print("ERROR: {} workers failed setup. Stopping.".format(setup_fail_count))
             stop_event.set()
-        except KeyboardInterrupt:
-            print("    Keyboard interrupt, stopping...")
-            stop_event.set()
+            return
 
-        monitor_th.join(timeout=2)
-        for th in worker_threads:
-            th.join(timeout=2)
+        print("    All {} workers setup successfully".format(setup_ok_count))
 
-        print_final_report(global_stats, args)
+        print(">>> Phase II: Running stress test for {}s...".format(test_duration))
+        start_time = time.time()
+        while time.time() - start_time < test_duration:
+            if stop_event.is_set():
+                print("    Detected stop signal, exiting early")
+                break
+
+            time.sleep(monitor_interval)
+            global_stats.drain_queue(stats_queue)
+
+            elapsed = time.time() - global_stats.start_time
+            bw, avg_lat, total_ops, total_errors = global_stats.snapshot_and_reset()
+            error_rate = total_errors / total_ops * 100 if total_ops > 0 else 0
+
+            print("[Monitor] {:6.1f}s - BW: {:5.2f} GB/s, AvgLat: {:.6f}s, "
+                  "Errors: {:3d}, ErrorRate: {:.1f}%".format(
+                      elapsed, bw, avg_lat, total_errors, error_rate))
+
+            alive = sum(1 for p in workers if p.is_alive())
+            if alive == 0:
+                print("    All workers died, stopping")
+                break
+
+        print("    Test duration reached, stopping all workers...")
+        stop_event.set()
+
+        for p in workers:
+            p.join(timeout=5)
+            if p.is_alive():
+                p.terminate()
+
+        global_stats.drain_queue(stats_queue)
+        print_final_report(global_stats, args, keys)
 
     except Exception as e:
         print("ERROR: {}".format(e))
     finally:
         print(">>> Cleanup")
-        for store, ptr in zip(stores, registered_ptrs):
-            try:
-                store.unregister_buffer(ptr)
-            except Exception:
-                pass
-        stores.clear()
-        registered_ptrs.clear()
-        gc.collect()
+        stop_event.set()
+        for p in workers:
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=2)
         stop_master(master_proc, master_log_file, master_log_path)
         if master_data_dir and os.path.exists(master_data_dir):
             shutil.rmtree(master_data_dir, ignore_errors=True)
-        if mm:
-            mm.close()
         gc.collect()
         print(">>> Test complete")
 
 
 if __name__ == "__main__":
+    multiprocessing.set_start_method("spawn", force=True)
     args = parse_args()
     try:
         run_stress_test(args)
@@ -605,5 +573,3 @@ if __name__ == "__main__":
         print("Interrupted by user")
     except Exception as e:
         print("Exception: {}".format(e))
-    finally:
-        stop_event.set()
