@@ -226,6 +226,7 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
         this->local_hostname = local_hostname;
         this->local_rpc_addr =
             hostname.substr(0, colon_pos + 1) + std::to_string(local_rpc_port);
+        LOG(WARNING) << "[DEBUG] RealClient::setup_internal calling Client::Create with master_server_addr=" << master_server_addr;
         auto client_opt = mooncake::Client::Create(
             this->local_hostname, metadata_server, protocol, device_name,
             master_server_addr, transfer_engine);
@@ -255,10 +256,12 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
             this->local_hostname = hostname + ":" + std::to_string(port);
             this->local_rpc_addr =
                 hostname + ":" + std::to_string(local_rpc_port);
+            LOG(WARNING) << "[DEBUG] RealClient::setup_internal calling Client::Create with master_server_addr=" << master_server_addr;
             auto client_opt = mooncake::Client::Create(
                 this->local_hostname, metadata_server, protocol, device_name,
                 master_server_addr, transfer_engine);
             if (client_opt) {
+                LOG(WARNING) << "[DEBUG] RealClient::setup_internal Client::Create succeeded";
                 client_ = *client_opt;
                 success = true;
                 LOG(INFO) << "Successfully created client on port " << port

@@ -1601,7 +1601,7 @@ tl::expected<std::string, ErrorCode> MasterService::GetFsdir() const {
 
 tl::expected<GetStorageConfigResponse, ErrorCode>
 MasterService::GetStorageConfig() const {
-    LOG(INFO) << "[DEBUG] GetStorageConfig called, root_fs_dir_="
+    LOG(WARNING) << "[DEBUG] GetStorageConfig called, root_fs_dir_="
               << root_fs_dir_ << ", cluster_id_=" << cluster_id_
               << ", enable_disk_eviction_=" << enable_disk_eviction_
               << ", quota_bytes_=" << quota_bytes_
@@ -1610,7 +1610,7 @@ MasterService::GetStorageConfig() const {
         LOG(INFO)
             << "Storage root directory or cluster ID is not set. persisting "
                "data is disabled.";
-        LOG(INFO) << "[DEBUG] Returning empty fsdir config: fsdir=\"\", "
+        LOG(WARNING) << "[DEBUG] Returning empty fsdir config: fsdir=\"\", "
                   << "enable_disk_eviction=" << enable_disk_eviction_
                   << ", quota_bytes=" << quota_bytes_
                   << ", use_od=" << use_od_;
@@ -1618,7 +1618,7 @@ MasterService::GetStorageConfig() const {
                                         quota_bytes_, use_od_);
     }
     std::string fsdir = root_fs_dir_ + "/" + cluster_id_;
-    LOG(INFO) << "[DEBUG] Returning full config: fsdir=" << fsdir
+    LOG(WARNING) << "[DEBUG] Returning full config: fsdir=" << fsdir
               << ", enable_disk_eviction=" << enable_disk_eviction_
               << ", quota_bytes=" << quota_bytes_
               << ", use_od=" << use_od_;
