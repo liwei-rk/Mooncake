@@ -57,6 +57,11 @@ void HttpMetadataServer::init_server() {
             std::string body(req.get_body());
             {
                 std::lock_guard<std::mutex> lock(store_mutex_);
+                if (key.find("rpc_meta") != std::string::npos &&
+                    store_.find(std::string(key)) != store_.end()) {
+                    LOG(INFO) << "Overwriting existing rpc_meta key: "
+                              << std::string(key);
+                }
                 store_[std::string(key)] = body;
             }
 

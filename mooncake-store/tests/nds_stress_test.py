@@ -485,8 +485,13 @@ def run_stress_test(args):
             global_segment_size = args.global_segment_size * MB
             local_buffer_size = args.local_buffer_size * MB
 
+            local_hostname = args.local_hostname
+            if local_hostname.endswith(":0"):
+                local_hostname = local_hostname[:-2] + ":{}".format(
+                    find_free_port())
+
             retcode = store.setup(
-                args.local_hostname,
+                local_hostname,
                 metadata_url,
                 global_segment_size,
                 local_buffer_size,
@@ -561,12 +566,6 @@ def run_stress_test(args):
 
         print_final_report(global_stats, args)
 
-        for store, ptr in zip(stores, registered_ptrs):
-            try:
-                store.unregister_buffer(ptr)
-            except Exception:
-                pass
-
     except Exception as e:
         print("ERROR: {}".format(e))
     finally:
@@ -576,6 +575,9 @@ def run_stress_test(args):
                 store.unregister_buffer(ptr)
             except Exception:
                 pass
+        stores.clear()
+        registered_ptrs.clear()
+        gc.collect()
         stop_master(master_proc, master_log_file, master_log_path)
         if mm:
             mm.close()
