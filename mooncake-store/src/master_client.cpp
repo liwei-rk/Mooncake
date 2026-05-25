@@ -232,11 +232,13 @@ tl::expected<ReturnType, ErrorCode> MasterClient::invoke_rpc(Args&&... args) {
     }
 
     auto start_time = std::chrono::steady_clock::now();
+    LOG(INFO) << "[DEBUG] invoke_rpc called for " << RpcNameTraits<ServiceMethod>::value;
     return async_simple::coro::syncAwait(
         [&]() -> async_simple::coro::Lazy<tl::expected<ReturnType, ErrorCode>> {
             auto ret = co_await pool->send_request(
                 [&](coro_io::client_reuse_hint,
                     coro_rpc::coro_rpc_client& client) {
+                    LOG(INFO) << "[DEBUG] send_request about to be called for " << RpcNameTraits<ServiceMethod>::value;
                     return client.send_request<ServiceMethod>(
                         std::forward<Args>(args)...);
                 });
@@ -244,11 +246,17 @@ tl::expected<ReturnType, ErrorCode> MasterClient::invoke_rpc(Args&&... args) {
                 LOG(ERROR) << "Client not available";
                 co_return tl::make_unexpected(ErrorCode::RPC_FAIL);
             }
+            LOG(INFO) << "[DEBUG] send_request returned, about to co_await result for " << RpcNameTraits<ServiceMethod>::value;
             auto result = co_await std::move(ret.value());
             if (!result) {
                 LOG(ERROR) << "RPC call failed: " << result.error().msg;
+                LOG(ERROR) << "[DEBUG] RPC call failed detail for " << RpcNameTraits<ServiceMethod>::value
+                           << ": error_code=" << result.error().err_code
+                           << ", error_msg=" << result.error().msg;
                 co_return tl::make_unexpected(ErrorCode::RPC_FAIL);
             }
+            LOG(INFO) << "[DEBUG] RPC call succeeded for " << RpcNameTraits<ServiceMethod>::value
+                      << ", about to extract result";
             if (metrics_) {
                 auto end_time = std::chrono::steady_clock::now();
                 auto latency =
@@ -618,8 +626,18 @@ MasterClient::GetStorageConfig() {
     ScopedVLogTimer timer(1, "MasterClient::GetStorageConfig");
     timer.LogRequest("action=get_storage_config");
 
+    LOG(INFO) << "[DEBUG] MasterClient::GetStorageConfig called, about to invoke RPC";
     auto result = invoke_rpc<&WrappedMasterService::GetStorageConfig,
                              GetStorageConfigResponse>();
+    if (result) {
+        auto& config = result.value();
+        LOG(INFO) << "[DEBUG] MasterClient::GetStorageConfig RPC success: fsdir=" << config.fsdir
+                  << ", enable_disk_eviction=" << config.enable_disk_eviction
+                  << ", quota_bytes=" << config.quota_bytes
+                  << ", use_od=" << config.use_od;
+    } else {
+        LOG(ERROR) << "[DEBUG] MasterClient::GetStorageConfig RPC failed: error=" << toString(result.error());
+    }
     timer.LogResponseExpected(result);
     return result;
 }
