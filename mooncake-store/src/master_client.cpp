@@ -251,8 +251,7 @@ tl::expected<ReturnType, ErrorCode> MasterClient::invoke_rpc(Args&&... args) {
             if (!result) {
                 LOG(ERROR) << "RPC call failed: " << result.error().msg;
                 LOG(ERROR) << "[DEBUG] RPC call failed detail for " << RpcNameTraits<ServiceMethod>::value
-                           << ": error_code=" << result.error().err_code
-                           << ", error_msg=" << result.error().msg;
+                           << ": error_msg=" << result.error().msg;
                 co_return tl::make_unexpected(ErrorCode::RPC_FAIL);
             }
             LOG(INFO) << "[DEBUG] RPC call succeeded for " << RpcNameTraits<ServiceMethod>::value
