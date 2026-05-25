@@ -21,13 +21,6 @@ MB = 1024**2
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 logger = logging.getLogger(__name__)
 
-OPERATION_MODE = "batch_put"
-BLOCK_SIZE = 128 * 1024
-BATCH_SIZE = 128
-NUM_WORKERS = 8
-TEST_DURATION = 30
-MONITOR_INTERVAL = 1
-
 MSG_BATCH_RESULT = "batch_result"
 MSG_SETUP_OK = "setup_ok"
 MSG_SETUP_FAIL = "setup_fail"

@@ -21,12 +21,6 @@ MB = 1024**2
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 logger = logging.getLogger(__name__)
 
-BLOCK_SIZE = 128 * 1024
-BATCH_SIZE = 128
-NUM_THREADS = 8
-TEST_DURATION = 30
-MONITOR_INTERVAL = 1
-
 def find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))

@@ -1854,6 +1854,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
 #else  // StorageBackend-first mode: disk first, memory second
     // === Phase 1: Collect all disk-bound operations, batch them ===
     if (HasDiskStorage()) {
+        auto t_disk_start = std::chrono::steady_clock::now();
         std::vector<size_t> disk_op_indices;
         std::vector<std::string> disk_keys;
         std::vector<std::vector<Slice>> disk_slices;
@@ -1886,9 +1887,14 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                 }
             }
         }
+        auto t_disk_end = std::chrono::steady_clock::now();
+        LOG(INFO) << "[BatchPut] SubmitTransfers disk phase (NDS write + PutEnd): "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         t_disk_end - t_disk_start).count() << " us";
     }
 
     // === Phase 2: Submit memory transfers ===
+    auto t_mem_start = std::chrono::steady_clock::now();
     for (auto& op : ops) {
         // Skip operations that already failed in previous stages
         if (op.IsResolved()) {
@@ -1934,6 +1940,10 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                     << " transfers for key " << op.key;
         }
     }
+    auto t_mem_end = std::chrono::steady_clock::now();
+    LOG(INFO) << "[BatchPut] SubmitTransfers memory phase (submit transfers): "
+              << std::chrono::duration_cast<std::chrono::microseconds>(
+                     t_mem_end - t_mem_start).count() << " us";
 #endif
 }
 
@@ -2021,7 +2031,12 @@ void Client::FinalizeBatchPut(std::vector<PutOperation>& ops) {
 
     // Process successful operations
     if (!successful_keys.empty()) {
+        auto t_end_start = std::chrono::steady_clock::now();
         auto end_responses = master_client_.BatchPutEnd(successful_keys);
+        auto t_end_done = std::chrono::steady_clock::now();
+        LOG(INFO) << "[BatchPut] FinalizeBatchPut BatchPutEnd RPC: "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         t_end_done - t_end_start).count() << " us";
         if (end_responses.size() != successful_keys.size()) {
             LOG(ERROR) << "BatchPutEnd response size mismatch: expected "
                        << successful_keys.size() << ", got "
@@ -2052,7 +2067,12 @@ void Client::FinalizeBatchPut(std::vector<PutOperation>& ops) {
 
     // Process failed operations that need cleanup
     if (!failed_keys.empty()) {
+        auto t_revoke_start = std::chrono::steady_clock::now();
         auto revoke_responses = master_client_.BatchPutRevoke(failed_keys);
+        auto t_revoke_done = std::chrono::steady_clock::now();
+        LOG(INFO) << "[BatchPut] FinalizeBatchPut BatchPutRevoke RPC: "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         t_revoke_done - t_revoke_start).count() << " us";
         if (revoke_responses.size() != failed_keys.size()) {
             LOG(ERROR) << "BatchPutRevoke response size mismatch: expected "
                        << failed_keys.size() << ", got "
@@ -2243,19 +2263,47 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
         StartBatchPut(ops, client_cfg);
         return BatchPutWhenPreferSameNode(ops);
     }
-    StartBatchPut(ops, client_cfg);
 
+    auto t_start_batch_put = std::chrono::steady_clock::now();
     auto t0 = std::chrono::steady_clock::now();
+    StartBatchPut(ops, client_cfg);
+    auto t_start_batch_put_end = std::chrono::steady_clock::now();
+    LOG(INFO) << "[BatchPut] StartBatchPut (BatchPutStart RPC): "
+              << std::chrono::duration_cast<std::chrono::microseconds>(
+                     t_start_batch_put_end - t0).count() << " us";
+
+    t0 = std::chrono::steady_clock::now();
     SubmitTransfers(ops);
+    auto t_submit_end = std::chrono::steady_clock::now();
+    LOG(INFO) << "[BatchPut] SubmitTransfers (disk+memory submit): "
+              << std::chrono::duration_cast<std::chrono::microseconds>(
+                     t_submit_end - t0).count() << " us";
+
+    t0 = std::chrono::steady_clock::now();
     WaitForTransfers(ops);
+    auto t_wait_end = std::chrono::steady_clock::now();
+    LOG(INFO) << "[BatchPut] WaitForTransfers (transfer completion): "
+              << std::chrono::duration_cast<std::chrono::microseconds>(
+                     t_wait_end - t0).count() << " us";
+
     auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-                  std::chrono::steady_clock::now() - t0)
+                  t_wait_end - t_submit_end)
                   .count();
     if (metrics_) {
         metrics_->transfer_metric.batch_put_latency_us.observe(us);
     }
 
+    t0 = std::chrono::steady_clock::now();
     FinalizeBatchPut(ops);
+    auto t_finalize_end = std::chrono::steady_clock::now();
+    LOG(INFO) << "[BatchPut] FinalizeBatchPut (BatchPutEnd/Revoke RPC): "
+              << std::chrono::duration_cast<std::chrono::microseconds>(
+                     t_finalize_end - t0).count() << " us";
+
+    LOG(INFO) << "[BatchPut] Total BatchPut: "
+              << std::chrono::duration_cast<std::chrono::microseconds>(
+                     t_finalize_end - t_start_batch_put).count() << " us";
+
     return CollectResults(ops);
 }
 
@@ -2750,12 +2798,18 @@ std::vector<std::optional<ErrorCode>> Client::PutBatchToLocalFile(
 
     if (use_od_) {
         if (!kv_storage_backend_ || n == 0) return results;
+        auto t_nds_start = std::chrono::steady_clock::now();
         auto store_result = kv_storage_backend_->StoreObjects(keys, batched_slices);
+        auto t_nds_end = std::chrono::steady_clock::now();
+        LOG(INFO) << "[BatchPut] PutBatchToLocalFile NDS StoreObjects: "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         t_nds_end - t_nds_start).count() << " us";
         if (!store_result) {
             LOG(ERROR) << "StoreObjects failed: " << toString(store_result.error());
             for (size_t i = 0; i < n; ++i) results[i] = store_result.error();
             return results;
         }
+        auto t_putend_start = std::chrono::steady_clock::now();
         for (size_t i = 0; i < n; ++i) {
             auto end_result = master_client_.PutEnd(keys[i], ReplicaType::DISK);
             if (!end_result) {
@@ -2764,6 +2818,10 @@ std::vector<std::optional<ErrorCode>> Client::PutBatchToLocalFile(
                 results[i] = end_result.error();
             }
         }
+        auto t_putend_end = std::chrono::steady_clock::now();
+        LOG(INFO) << "[BatchPut] PutBatchToLocalFile PutEnd(DISK) per-key RPC (" << n << " keys): "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         t_putend_end - t_putend_start).count() << " us";
         return results;
     }
 
