@@ -159,41 +159,12 @@ def stop_master(master_proc, master_log_file, master_log_path):
     print("    Master stopped")
 
 
-def load_keys_from_file(filepath="key.txt"):
-    keys = []
-    print("    Loading block keys from {}...".format(filepath))
-    try:
-        with open(filepath, "r") as f:
-            lines = f.readlines()
-            if not lines:
-                raise ValueError("key.txt is empty")
-            for line in lines:
-                line = line.strip()
-                if line:
-                    keys.append(line)
-            if not keys:
-                raise ValueError("No valid keys found")
-            print("    Successfully loaded {} keys".format(len(keys)))
-    except FileNotFoundError:
-        print("    Warning: key.txt not found")
-    except Exception as e:
-        print("    Failed to load keys: {}".format(e))
-    return keys
+def generate_batch_keys(entity_id, batch_seq, batch_size):
+    return ["w{}_b{}_k{}".format(entity_id, batch_seq, i)
+            for i in range(batch_size)]
 
 
-def get_next_batch_keys(pre_loaded_keys, current_index, count):
-    total_keys = len(pre_loaded_keys)
-    if total_keys == 0:
-        return [], current_index
-    keys = []
-    for i in range(count):
-        idx = (current_index + i) % total_keys
-        keys.append(pre_loaded_keys[idx])
-    new_index = (current_index + count) % total_keys
-    return keys, new_index
-
-
-def worker_process(worker_idx, operation_mode, keys, block_size, batch_size,
+def worker_process(worker_idx, operation_mode, block_size, batch_size,
                    metadata_url, master_addr, global_segment_size, local_buffer_size,
                    protocol, device_name, local_hostname_base, test_duration,
                    stats_queue, stop_event):
@@ -240,18 +211,13 @@ def worker_process(worker_idx, operation_mode, keys, block_size, batch_size,
 
     stats_queue.put((MSG_SETUP_OK, worker_idx, 0))
 
-    current_key_index = 0
+    batch_seq = 0
     total_batch_bytes = batch_size * block_size
 
     try:
         while not stop_event.is_set():
             try:
-                batch_keys, current_key_index = get_next_batch_keys(
-                    keys, current_key_index, batch_size)
-
-                if not batch_keys:
-                    time.sleep(0.01)
-                    continue
+                batch_keys = generate_batch_keys(worker_idx, batch_seq, batch_size)
 
                 buffer_ptrs = []
                 sizes = []
@@ -264,29 +230,18 @@ def worker_process(worker_idx, operation_mode, keys, block_size, batch_size,
                 if operation_mode == "batch_put":
                     ret_codes = store.batch_put_from(batch_keys, buffer_ptrs, sizes)
                     all_success = all(rc == 0 for rc in ret_codes)
-                    latency = time.time() - start_time
-                    if all_success:
-                        for k in batch_keys:
-                            try:
-                                store.remove(k)
-                            except Exception:
-                                pass
                 elif operation_mode == "batch_get":
                     put_codes = store.batch_put_from(batch_keys, buffer_ptrs, sizes)
                     put_ok = all(rc == 0 for rc in put_codes)
                     if put_ok:
                         ret_codes = store.batch_get_into(batch_keys, buffer_ptrs, sizes)
                         all_success = all(rc > 0 for rc in ret_codes)
-                        latency = time.time() - start_time
-                        for k in batch_keys:
-                            try:
-                                store.remove(k)
-                            except Exception:
-                                pass
                     else:
                         all_success = False
                         ret_codes = put_codes
-                        latency = time.time() - start_time
+                latency = time.time() - start_time
+
+                batch_seq += 1
 
                 stats_queue.put((MSG_BATCH_RESULT, worker_idx, all_success,
                                  total_batch_bytes, latency))
@@ -384,7 +339,7 @@ class GlobalStats:
                 self.add_batch_stats(worker_idx, success, total_size, latency)
 
 
-def print_final_report(global_stats, args, keys):
+def print_final_report(global_stats, args):
     print("\n" + "=" * 80)
     print("NDS STRESS TEST - FINAL REPORT".center(80))
     print("=" * 80)
@@ -394,7 +349,6 @@ def print_final_report(global_stats, args, keys):
     print("Batch size:          {}".format(args.batch_size))
     print("Block size:          {} ({:.2f} MB)".format(args.block_size, args.block_size / MB))
     print("Num workers:         {}".format(args.num_workers))
-    print("Keys from key.txt:   {}".format(len(keys)))
     print("-" * 80)
 
     total_bytes = global_stats.get_all_bytes()
@@ -443,9 +397,6 @@ def parse_args():
                         help="Local buffer size in MB")
     parser.add_argument("--master-binary", type=str, default="",
                         help="Path to mooncake_master binary (auto-detect if empty)")
-
-    parser.add_argument("--key-file", type=str, default="key.txt",
-                        help="Path to key.txt file containing block keys")
     return parser.parse_args()
 
 
@@ -467,11 +418,6 @@ def run_stress_test(args):
     print("Test duration:       {}s".format(test_duration))
     print("Protocol:            {}".format(args.protocol))
     print("=" * 80)
-
-    keys = load_keys_from_file(args.key_file)
-    if not keys:
-        print("ERROR: No keys loaded. Cannot run test.")
-        return
 
     master_proc = None
     master_log_file = None
@@ -499,7 +445,7 @@ def run_stress_test(args):
 
             p = multiprocessing.Process(
                 target=worker_process,
-                args=(i, worker_mode, keys, block_size, batch_size,
+                args=(i, worker_mode, block_size, batch_size,
                       metadata_url, master_addr,
                       global_segment_size, local_buffer_size,
                       args.protocol, args.device_name,
@@ -565,7 +511,7 @@ def run_stress_test(args):
                 p.terminate()
 
         global_stats.drain_queue(stats_queue)
-        print_final_report(global_stats, args, keys)
+        print_final_report(global_stats, args)
 
     except Exception as e:
         print("ERROR: {}".format(e))
