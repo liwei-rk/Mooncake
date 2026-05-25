@@ -442,7 +442,6 @@ def run_stress_test(args):
     print("Num threads:         {}".format(NUM_THREADS))
     print("Test duration:       {}s".format(TEST_DURATION))
     print("Protocol:            {}".format(args.protocol))
-    print("Metadata server:     {}".format(args.metadata_server))
     print("=" * 80)
 
     load_keys_from_file(args.key_file)
@@ -476,17 +475,16 @@ def run_stress_test(args):
 
         retcode = store.setup(
             args.local_hostname,
-            args.metadata_server,
+            metadata_url,
             global_segment_size,
             local_buffer_size,
             args.protocol,
             args.device_name,
-            args.master_server
+            master_addr
         )
 
         if retcode:
             print("ERROR: Store setup failed for thread {}, retcode={}".format(i, retcode))
-            mm.close()
             return
 
         thread_buf_start = i * buffer_size_per_thread
@@ -499,7 +497,6 @@ def run_stress_test(args):
         if retcode:
             print("ERROR: Buffer registration failed for thread {}, retcode={}".format(
                 i, retcode))
-            mm.close()
             return
 
         stores.append(store)
