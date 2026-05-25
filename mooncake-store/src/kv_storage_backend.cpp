@@ -42,7 +42,7 @@ struct NDSLoader {
 
         handle = dlopen(lib_path.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (!handle) {
-            LOG(ERROR) << "Failed to load " << lib_path << ": " << dlerror();
+            // LOG(ERROR) << "Failed to load " << lib_path << ": " << dlerror();
             return false;
         }
 
@@ -54,13 +54,13 @@ struct NDSLoader {
         batchPut = (NDS_batchPut_fn)dlsym(handle, "batchPut");
 
         if (!init || !get || !put || !batchGet || !batchPut) {
-            LOG(ERROR) << "Failed to load NDS functions";
+            // LOG(ERROR) << "Failed to load NDS functions";
             dlclose(handle);
             handle = nullptr;
             return false;
         }
 
-        LOG(INFO) << "Successfully loaded libndskv.so";
+        // LOG(INFO) << "Successfully loaded libndskv.so";
         return true;
     }
 
@@ -76,7 +76,7 @@ struct NDSLoader {
 
 KVStorageBackend::~KVStorageBackend() {
     if (nds_mem_addr_ && owns_nds_memory_) {
-        LOG(INFO) << "Cleaning up KV storage backend memory";
+        // LOG(INFO) << "Cleaning up KV storage backend memory";
         free(nds_mem_addr_);
         nds_mem_addr_ = nullptr;
         nds_mem_size_ = 0;
@@ -91,13 +91,13 @@ KVStorageBackend::~KVStorageBackend() {
 tl::expected<void, ErrorCode> KVStorageBackend::Init(void* nds_mem_addr,
                                                      uint64_t nds_mem_size) {
     if (initialized_.load(std::memory_order_acquire)) {
-        LOG(WARNING) << "KVStorageBackend is already initialized. Skipping.";
+        // LOG(WARNING) << "KVStorageBackend is already initialized. Skipping.";
         return {};
     }
 
     bool nds_loaded = NDSLoader::Instance().Load();
     if (!nds_loaded) {
-        LOG(ERROR) << "KVStorageBackend requires NDS library but failed to load";
+        // LOG(ERROR) << "KVStorageBackend requires NDS library but failed to load";
         return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
     }
 
@@ -109,11 +109,11 @@ tl::expected<void, ErrorCode> KVStorageBackend::Init(void* nds_mem_addr,
             nds_mem_size_ = nds_mem_size;
             int32_t result = loader.init(nds_mem_addr_, nds_mem_size_);
             if (result != 0) {
-                LOG(ERROR) << "Failed to initialize NDS KV storage with external memory: " << result;
+                // LOG(ERROR) << "Failed to initialize NDS KV storage with external memory: " << result;
                 return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
             }
-            LOG(INFO) << "NDS KV storage initialized with external memory, size: "
-                      << nds_mem_size_ << " bytes";
+            // LOG(INFO) << "NDS KV storage initialized with external memory, size: "
+            //           << nds_mem_size_ << " bytes";
             owns_nds_memory_ = false;
             loader.nds_initialized = true;
             loader.nds_mem_addr = nds_mem_addr_;
@@ -128,21 +128,21 @@ tl::expected<void, ErrorCode> KVStorageBackend::Init(void* nds_mem_addr,
 
             nds_mem_addr_ = std::aligned_alloc(kNDSAlignment, aligned_size);
             if (!nds_mem_addr_) {
-                LOG(ERROR) << "Failed to allocate 4096-aligned memory for NDS: "
-                           << aligned_size << " bytes";
+                // LOG(ERROR) << "Failed to allocate 4096-aligned memory for NDS: "
+                //            << aligned_size << " bytes";
                 return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
             }
 
             int32_t result = loader.init(nds_mem_addr_, nds_mem_size_);
             if (result != 0) {
-                LOG(ERROR) << "Failed to initialize NDS KV storage: " << result;
+                // LOG(ERROR) << "Failed to initialize NDS KV storage: " << result;
                 free(nds_mem_addr_);
                 nds_mem_addr_ = nullptr;
                 return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
             }
 
-            LOG(INFO) << "NDS KV storage initialized, size: " << nds_mem_size_
-                      << " bytes";
+            // LOG(INFO) << "NDS KV storage initialized, size: " << nds_mem_size_
+            //           << " bytes";
             owns_nds_memory_ = true;
             loader.nds_initialized = true;
             loader.nds_mem_addr = nds_mem_addr_;
@@ -151,7 +151,7 @@ tl::expected<void, ErrorCode> KVStorageBackend::Init(void* nds_mem_addr,
     } else {
         nds_mem_addr_ = loader.nds_mem_addr;
         nds_mem_size_ = loader.nds_mem_size;
-        LOG(INFO) << "NDS KV storage already initialized, reusing existing instance";
+        // LOG(INFO) << "NDS KV storage already initialized, reusing existing instance";
     }
 
     initialized_.store(true, std::memory_order_release);
@@ -184,9 +184,6 @@ tl::expected<std::vector<std::string>, ErrorCode> KVStorageBackend::StoreObjects
               << std::chrono::duration_cast<std::chrono::microseconds>(
                      t_flatten_end - t0).count() << " us";
 
-    VLOG(0) << "[KVStoreObjects] num_keys=" << keys.size()
-            << " num_slices=" << blockIds.size();
-
     auto& loader = NDSLoader::Instance();
     int32_t result = loader.batchPut(blockIds.data(), blockAddrs.data(),
                                      nds_offsets.data(), nds_lengths.data(),
@@ -196,13 +193,11 @@ tl::expected<std::vector<std::string>, ErrorCode> KVStorageBackend::StoreObjects
               << std::chrono::duration_cast<std::chrono::microseconds>(
                      t_batchput_end - t_flatten_end).count() << " us";
     if (result != 0) {
-        LOG(ERROR) << "NDS batchPut failed: " << result
-                   << " for " << blockIds.size() << " slices";
+        // LOG(ERROR) << "NDS batchPut failed: " << result
+        //            << " for " << blockIds.size() << " slices";
         return tl::unexpected(ErrorCode::WRITE_FAIL);
     }
 
-    VLOG(0) << "Successfully wrote " << keys.size() << " objects ("
-            << blockIds.size() << " slices) to NDS";
     return std::vector<std::string>{};
 }
 
@@ -227,34 +222,29 @@ tl::expected<void, ErrorCode> KVStorageBackend::LoadObjects(
         }
     }
 
-    VLOG(0) << "[KVLoadObjects] num_keys=" << keys.size()
-            << " num_slices=" << blockIds.size();
-
     auto& loader = NDSLoader::Instance();
     int32_t result = loader.batchGet(blockIds.data(), blockAddrs.data(),
                                      nds_offsets.data(), nds_lengths.data(),
                                      static_cast<int32_t>(blockIds.size()));
     if (result != 0) {
-        LOG(ERROR) << "NDS batchGet failed: " << result
-                   << " for " << blockIds.size() << " slices";
+        // LOG(ERROR) << "NDS batchGet failed: " << result
+        //            << " for " << blockIds.size() << " slices";
         return tl::unexpected(ErrorCode::FILE_READ_FAIL);
     }
 
-    VLOG(0) << "Successfully read " << keys.size() << " objects ("
-            << blockIds.size() << " slices) from NDS";
     return {};
 }
 
 void KVStorageBackend::Remove(const std::string& key) {
-    VLOG(0) << "[KVRemove] NDS KV store does not support deletion for key: " << key;
+    // VLOG(0) << "[KVRemove] NDS KV store does not support deletion for key: " << key;
 }
 
 void KVStorageBackend::RemoveByRegex(const std::string& key) {
-    VLOG(0) << "[KVRemoveByRegex] NDS KV store does not support regex deletion: " << key;
+    // VLOG(0) << "[KVRemoveByRegex] NDS KV store does not support regex deletion: " << key;
 }
 
 void KVStorageBackend::RemoveAll() {
-    VLOG(0) << "[KVRemoveAll] NDS KV store does not support RemoveAll";
+    // VLOG(0) << "[KVRemoveAll] NDS KV store does not support RemoveAll";
 }
 
 }  // namespace mooncake
