@@ -505,10 +505,15 @@ std::optional<std::shared_ptr<Client>> Client::Create(
         }
     } else {
         auto config = config_response.value();
+        client->use_od_ = config.use_od;
+        LOG(INFO) << "Use OD: " << config.use_od;
         if (config.fsdir.empty()) {
             LOG(INFO)
                 << "Storage root directory is not set. persisting data is "
                    "disabled.";
+            client->PrepareStorageBackend("", "", config.enable_disk_eviction,
+                                           config.quota_bytes,
+                                           nds_mem_addr, nds_mem_size);
         } else {
             size_t pos = config.fsdir.find_last_of('/');
             if (pos != std::string::npos) {
