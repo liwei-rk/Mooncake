@@ -264,11 +264,30 @@ def worker_process(worker_idx, operation_mode, keys, block_size, batch_size,
                 if operation_mode == "batch_put":
                     ret_codes = store.batch_put_from(batch_keys, buffer_ptrs, sizes)
                     all_success = all(rc == 0 for rc in ret_codes)
-                else:
-                    ret_codes = store.batch_get_into(batch_keys, buffer_ptrs, sizes)
-                    all_success = all(rc > 0 for rc in ret_codes)
+                    latency = time.time() - start_time
+                    if all_success:
+                        for k in batch_keys:
+                            try:
+                                store.remove(k)
+                            except Exception:
+                                pass
+                elif operation_mode == "batch_get":
+                    put_codes = store.batch_put_from(batch_keys, buffer_ptrs, sizes)
+                    put_ok = all(rc == 0 for rc in put_codes)
+                    if put_ok:
+                        ret_codes = store.batch_get_into(batch_keys, buffer_ptrs, sizes)
+                        all_success = all(rc > 0 for rc in ret_codes)
+                        latency = time.time() - start_time
+                        for k in batch_keys:
+                            try:
+                                store.remove(k)
+                            except Exception:
+                                pass
+                    else:
+                        all_success = False
+                        ret_codes = put_codes
+                        latency = time.time() - start_time
 
-                latency = time.time() - start_time
                 stats_queue.put((MSG_BATCH_RESULT, worker_idx, all_success,
                                  total_batch_bytes, latency))
 
