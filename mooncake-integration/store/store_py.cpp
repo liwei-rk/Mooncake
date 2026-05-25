@@ -1911,6 +1911,14 @@ PYBIND11_MODULE(store, m) {
         },
         py::arg("level"),
         "Set glog VLOG level (0=INFO, higher=more verbose)");
+
+    m.def(
+        "set_log_to_stderr",
+        [](bool enabled = true) {
+            FLAGS_logtostderr = enabled ? 1 : 0;
+        },
+        py::arg("enabled") = true,
+        "Set whether glog logs go to stderr instead of log files");
 }
 
 }  // namespace mooncake
