@@ -2750,6 +2750,7 @@ std::vector<std::optional<ErrorCode>> Client::PutBatchToLocalFile(
 
     if (use_od_) {
         if (!kv_storage_backend_ || n == 0) return results;
+        LOG(ERROR) << "1111111111111111111111111";
         auto store_result = kv_storage_backend_->StoreObjects(keys, batched_slices);
         if (!store_result) {
             LOG(ERROR) << "StoreObjects failed: " << toString(store_result.error());
