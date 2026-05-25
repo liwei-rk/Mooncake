@@ -8,6 +8,7 @@
 #include "types.h"
 
 #include <cstdlib>  // for atexit
+#include <glog/logging.h>
 
 #include "integration_utils.h"
 
@@ -1894,6 +1895,22 @@ PYBIND11_MODULE(store, m) {
         py::arg("node"),
         "Bind the current thread and memory allocation preference to the "
         "specified NUMA node");
+
+    m.def(
+        "init_glog",
+        [](const std::string& argv0 = "mooncake_store") {
+            google::InitGoogleLogging(argv0.c_str());
+        },
+        py::arg("argv0") = "mooncake_store",
+        "Initialize glog to enable VLOG/LOG output from C++ code");
+
+    m.def(
+        "set_vlog_level",
+        [](int level) {
+            FLAGS_v = level;
+        },
+        py::arg("level"),
+        "Set glog VLOG level (0=INFO, higher=more verbose)");
 }
 
 }  // namespace mooncake

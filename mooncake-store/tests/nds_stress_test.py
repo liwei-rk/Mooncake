@@ -16,6 +16,7 @@ import urllib.error
 import logging
 from collections import defaultdict
 from mooncake.store import MooncakeDistributedStore
+import mooncake.store
 
 GB = 1024**3
 MB = 1024**2
@@ -479,6 +480,8 @@ def run_stress_test(args):
         full_pattern = np.tile(pattern, BATCH_SIZE)
 
         print(">>> Phase II: Setup MooncakeDistributedStore clients")
+        mooncake.store.init_glog()
+        mooncake.store.set_vlog_level(0)
         for i in range(total_threads):
             store = MooncakeDistributedStore()
 
