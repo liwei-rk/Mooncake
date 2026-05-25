@@ -4,7 +4,6 @@ import mmap
 import numpy as np
 import time
 import multiprocessing
-import sys
 import os
 import subprocess
 import shutil
@@ -13,7 +12,6 @@ import tempfile
 import urllib.request
 import urllib.error
 import logging
-from collections import defaultdict
 from mooncake.store import MooncakeDistributedStore
 import mooncake.store
 
@@ -29,9 +27,6 @@ BATCH_SIZE = 128
 NUM_WORKERS = 8
 TEST_DURATION = 30
 MONITOR_INTERVAL = 1
-
-GLOBAL_SEGMENT_SIZE_MB = 3200
-LOCAL_BUFFER_SIZE_MB = 512
 
 MSG_BATCH_RESULT = "batch_result"
 MSG_SETUP_OK = "setup_ok"
@@ -110,6 +105,7 @@ def start_master(args):
         "--http_metadata_server_port={}".format(http_port),
         "--metrics_port={}".format(metrics_port),
         "--default_kv_lease_ttl=500",
+        "--rpc_thread_num={}".format(args.num_workers * 2),
     ]
 
     print(">>> Starting master server...")
@@ -165,7 +161,7 @@ def generate_batch_keys(entity_id, batch_seq, batch_size):
 
 
 def worker_process(worker_idx, operation_mode, block_size, batch_size,
-                   metadata_url, master_addr, global_segment_size, local_buffer_size,
+                   metadata_url, master_addr, global_segment_size,
                    protocol, device_name, local_hostname_base, test_duration,
                    stats_queue, stop_event):
     buffer_size = batch_size * block_size
@@ -188,13 +184,13 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
 
     store = MooncakeDistributedStore()
     retcode = store.setup(
-        local_hostname,
-        metadata_url,
-        global_segment_size,
-        local_buffer_size,
-        protocol,
-        device_name,
-        master_addr,
+        local_hostname=local_hostname,
+        metadata_server=metadata_url,
+        global_segment_size=global_segment_size,
+        local_buffer_size=buffer_size,
+        protocol=protocol,
+        rdma_devices=device_name,
+        master_server_addr=master_addr,
         nds_mem_addr=buf_ptr,
         nds_mem_size=buffer_size,
     )
@@ -385,10 +381,8 @@ def parse_args():
                         help="RDMA device name (empty for TCP)")
     parser.add_argument("--local-hostname", type=str, default="127.0.0.1:0",
                         help="Local hostname (port 0 = auto-detect)")
-    parser.add_argument("--global-segment-size", type=int, default=3200,
+    parser.add_argument("--global-segment-size", type=int, default=256,
                         help="Global segment size in MB")
-    parser.add_argument("--local-buffer-size", type=int, default=512,
-                        help="Local buffer size in MB")
     parser.add_argument("--master-binary", type=str, default="",
                         help="Path to mooncake_master binary (auto-detect if empty)")
     return parser.parse_args()
@@ -429,7 +423,6 @@ def run_stress_test(args):
         master_addr = "127.0.0.1:{}".format(rpc_port)
 
         global_segment_size = args.global_segment_size * MB
-        local_buffer_size = args.local_buffer_size * MB
 
         print(">>> Phase I: Spawn {} worker processes (each with own NDS)".format(num_workers))
         for i in range(num_workers):
@@ -441,7 +434,7 @@ def run_stress_test(args):
                 target=worker_process,
                 args=(i, worker_mode, block_size, batch_size,
                       metadata_url, master_addr,
-                      global_segment_size, local_buffer_size,
+                      global_segment_size,
                       args.protocol, args.device_name,
                       args.local_hostname, test_duration,
                       stats_queue, stop_event),

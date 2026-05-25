@@ -4,7 +4,6 @@ import mmap
 import numpy as np
 import time
 import threading
-import sys
 import os
 import subprocess
 import shutil
@@ -27,10 +26,6 @@ BATCH_SIZE = 128
 NUM_THREADS = 8
 TEST_DURATION = 30
 MONITOR_INTERVAL = 1
-
-GLOBAL_SEGMENT_SIZE_MB = 3200
-LOCAL_BUFFER_SIZE_MB = 512
-
 
 def find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -102,6 +97,7 @@ def start_master(args):
         "--http_metadata_server_port={}".format(http_port),
         "--metrics_port={}".format(metrics_port),
         "--default_kv_lease_ttl=500",
+        "--rpc_thread_num={}".format(args.num_threads * 2),
     ]
 
     print(">>> Starting master server...")
@@ -324,10 +320,8 @@ def parse_args():
                         help="RDMA device name (empty for TCP)")
     parser.add_argument("--local-hostname", type=str, default="127.0.0.1:0",
                         help="Local hostname (port 0 = auto-detect)")
-    parser.add_argument("--global-segment-size", type=int, default=3200,
+    parser.add_argument("--global-segment-size", type=int, default=512,
                         help="Global segment size in MB")
-    parser.add_argument("--local-buffer-size", type=int, default=512,
-                        help="Local buffer size in MB")
     parser.add_argument("--master-binary", type=str, default="",
                         help="Path to mooncake_master binary (auto-detect if empty)")
     return parser.parse_args()
@@ -370,7 +364,6 @@ def run_thread_stress_test(args):
         master_addr = "127.0.0.1:{}".format(rpc_port)
 
         global_segment_size = args.global_segment_size * MB
-        local_buffer_size = args.local_buffer_size * MB
 
         print(">>> Phase I: Setup single Client with NDS init memory = shared buffer")
         mooncake.store.init_glog()
@@ -392,13 +385,13 @@ def run_thread_stress_test(args):
 
         store = MooncakeDistributedStore()
         retcode = store.setup(
-            local_hostname,
-            metadata_url,
-            global_segment_size,
-            local_buffer_size,
-            args.protocol,
-            args.device_name,
-            master_addr,
+            local_hostname=local_hostname,
+            metadata_server=metadata_url,
+            global_segment_size=global_segment_size,
+            local_buffer_size=total_buffer_size,
+            protocol=args.protocol,
+            rdma_devices=args.device_name,
+            master_server_addr=master_addr,
             nds_mem_addr=buf_ptr,
             nds_mem_size=total_buffer_size,
         )
