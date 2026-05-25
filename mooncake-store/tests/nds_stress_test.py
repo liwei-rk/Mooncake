@@ -180,7 +180,6 @@ def start_master(args):
         "--http_metadata_server_port={}".format(http_port),
         "--metrics_port={}".format(metrics_port),
         "--default_kv_lease_ttl=500",
-        "--root_fs_dir={}".format(args.root_fs_dir),
     ]
 
     print(">>> Starting master server...")
@@ -418,8 +417,6 @@ def parse_args():
                         help="Local buffer size in MB")
     parser.add_argument("--master-binary", type=str, default="",
                         help="Path to mooncake_master binary (auto-detect if empty)")
-    parser.add_argument("--root-fs-dir", type=str, default="/tmp/mooncake_nds_test",
-                        help="Root fs dir for master server")
 
     parser.add_argument("--key-file", type=str, default="key.txt",
                         help="Path to key.txt file containing block keys")
@@ -445,6 +442,7 @@ def run_stress_test(args):
     print("Num threads:         {}".format(NUM_THREADS))
     print("Test duration:       {}s".format(TEST_DURATION))
     print("Protocol:            {}".format(args.protocol))
+    print("Metadata server:     {}".format(args.metadata_server))
     print("=" * 80)
 
     load_keys_from_file(args.key_file)
@@ -452,137 +450,121 @@ def run_stress_test(args):
         print("ERROR: No keys loaded. Cannot run test.")
         return
 
-    master_proc = None
-    master_log_file = None
-    master_log_path = None
+    total_threads = NUM_THREADS
+    buffer_size_per_thread = BATCH_SIZE * BLOCK_SIZE
+    total_buffer_size = buffer_size_per_thread * total_threads
+
+    print(">>> Phase I: Allocate page-aligned buffer ({:.2f} MB total)".format(
+        total_buffer_size / MB))
+    mm = mmap.mmap(-1, total_buffer_size,
+                   flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+    buf = np.frombuffer(mm, dtype=np.uint8, count=total_buffer_size)
+    base_addr = buf.__array_interface__["data"][0]
+    print("    Buffer base address = 0x{:x}".format(base_addr))
+    print("    4096-aligned? {}".format("YES" if base_addr % 4096 == 0 else "NO"))
+
+    pattern = (np.arange(BLOCK_SIZE, dtype=np.uint32) % 251).astype(np.uint8)
+
+    print(">>> Phase II: Setup MooncakeDistributedStore clients")
     stores = []
     registered_ptrs = []
-    mm = None
-    global_stats = None
+    for i in range(total_threads):
+        store = MooncakeDistributedStore()
+
+        global_segment_size = args.global_segment_size * MB
+        local_buffer_size = args.local_buffer_size * MB
+
+        retcode = store.setup(
+            args.local_hostname,
+            args.metadata_server,
+            global_segment_size,
+            local_buffer_size,
+            args.protocol,
+            args.device_name,
+            args.master_server
+        )
+
+        if retcode:
+            print("ERROR: Store setup failed for thread {}, retcode={}".format(i, retcode))
+            mm.close()
+            return
+
+        thread_buf_start = i * buffer_size_per_thread
+        thread_buf_end = thread_buf_start + buffer_size_per_thread
+        thread_buf = buf[thread_buf_start:thread_buf_end]
+        thread_buf[:] = pattern
+        thread_buf_ptr = thread_buf.ctypes.data
+
+        retcode = store.register_buffer(thread_buf_ptr, buffer_size_per_thread)
+        if retcode:
+            print("ERROR: Buffer registration failed for thread {}, retcode={}".format(
+                i, retcode))
+            mm.close()
+            return
+
+        stores.append(store)
+        registered_ptrs.append(thread_buf_ptr)
+        print("    Thread {} client setup + buffer registered OK".format(i))
+
+    print(">>> Phase III: Start monitor and worker threads")
+    global_stats = GlobalStats(total_threads)
+
+    monitor_th = threading.Thread(target=monitor_thread, args=(global_stats,), daemon=True)
+    monitor_th.start()
+
+    worker_threads = []
+    for i in range(total_threads):
+        if OPERATION_MODE == "batch_put":
+            target = batch_put_worker
+        elif OPERATION_MODE == "batch_get":
+            target = batch_get_worker
+        elif OPERATION_MODE == "mixed":
+            target = batch_put_worker if i % 2 == 0 else batch_get_worker
+        else:
+            target = batch_put_worker
+
+        th = threading.Thread(
+            target=target,
+            args=(i, stores[i], registered_ptrs[i], BLOCK_SIZE, BATCH_SIZE, global_stats),
+            daemon=True
+        )
+        th.start()
+        worker_threads.append(th)
+
+    print("    Started {} worker threads + 1 monitor thread".format(total_threads))
 
     try:
-        master_proc, master_log_file, master_log_path, rpc_port, http_port = start_master(args)
-        metadata_url = "http://127.0.0.1:{}/metadata".format(http_port)
-        master_addr = "127.0.0.1:{}".format(rpc_port)
+        start_time = time.time()
+        while time.time() - start_time < TEST_DURATION:
+            if stop_event.is_set():
+                print("    Detected error, exiting early")
+                break
+            time.sleep(0.1)
+        print("    Test duration reached, stopping all threads...")
+        stop_event.set()
+    except KeyboardInterrupt:
+        print("    Keyboard interrupt, stopping...")
+        stop_event.set()
 
-        total_threads = NUM_THREADS
-        buffer_size_per_thread = BATCH_SIZE * BLOCK_SIZE
-        total_buffer_size = buffer_size_per_thread * total_threads
+    monitor_th.join(timeout=2)
+    for th in worker_threads:
+        th.join(timeout=2)
 
-        print(">>> Phase I: Allocate page-aligned buffer ({:.2f} MB total)".format(
-            total_buffer_size / MB))
-        mm = mmap.mmap(-1, total_buffer_size,
-                       flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
-        buf = np.frombuffer(mm, dtype=np.uint8, count=total_buffer_size)
-        base_addr = buf.__array_interface__["data"][0]
-        print("    Buffer base address = 0x{:x}".format(base_addr))
-        print("    4096-aligned? {}".format("YES" if base_addr % 4096 == 0 else "NO"))
+    print_final_report(global_stats, args)
 
-        pattern = (np.arange(BLOCK_SIZE, dtype=np.uint32) % 251).astype(np.uint8)
-
-        print(">>> Phase II: Setup MooncakeDistributedStore clients")
-        for i in range(total_threads):
-            store = MooncakeDistributedStore()
-
-            global_segment_size = args.global_segment_size * MB
-            local_buffer_size = args.local_buffer_size * MB
-
-            retcode = store.setup(
-                args.local_hostname,
-                metadata_url,
-                global_segment_size,
-                local_buffer_size,
-                args.protocol,
-                args.device_name,
-                master_addr
-            )
-
-            if retcode:
-                print("ERROR: Store setup failed for thread {}, retcode={}".format(i, retcode))
-                return
-
-            thread_buf_start = i * buffer_size_per_thread
-            thread_buf_end = thread_buf_start + buffer_size_per_thread
-            thread_buf = buf[thread_buf_start:thread_buf_end]
-            thread_buf[:] = pattern
-            thread_buf_ptr = thread_buf.ctypes.data
-
-            retcode = store.register_buffer(thread_buf_ptr, buffer_size_per_thread)
-            if retcode:
-                print("ERROR: Buffer registration failed for thread {}, retcode={}".format(
-                    i, retcode))
-                return
-
-            stores.append(store)
-            registered_ptrs.append(thread_buf_ptr)
-            print("    Thread {} client setup + buffer registered OK".format(i))
-
-        print(">>> Phase III: Start monitor and worker threads")
-        global_stats = GlobalStats(total_threads)
-
-        monitor_th = threading.Thread(target=monitor_thread, args=(global_stats,), daemon=True)
-        monitor_th.start()
-
-        worker_threads = []
-        for i in range(total_threads):
-            if OPERATION_MODE == "batch_put":
-                target = batch_put_worker
-            elif OPERATION_MODE == "batch_get":
-                target = batch_get_worker
-            elif OPERATION_MODE == "mixed":
-                target = batch_put_worker if i % 2 == 0 else batch_get_worker
-            else:
-                target = batch_put_worker
-
-            th = threading.Thread(
-                target=target,
-                args=(i, stores[i], registered_ptrs[i], BLOCK_SIZE, BATCH_SIZE, global_stats),
-                daemon=True
-            )
-            th.start()
-            worker_threads.append(th)
-
-        print("    Started {} worker threads + 1 monitor thread".format(total_threads))
-
+    for store, ptr in zip(stores, registered_ptrs):
         try:
-            start_time = time.time()
-            while time.time() - start_time < TEST_DURATION:
-                if stop_event.is_set():
-                    print("    Detected error, exiting early")
-                    break
-                time.sleep(0.1)
-            print("    Test duration reached, stopping all threads...")
-            stop_event.set()
-        except KeyboardInterrupt:
-            print("    Keyboard interrupt, stopping...")
-            stop_event.set()
+            store.unregister_buffer(ptr)
+        except Exception:
+            pass
 
-        monitor_th.join(timeout=2)
-        for th in worker_threads:
-            th.join(timeout=2)
-
-        print_final_report(global_stats, args)
-
-        for store, ptr in zip(stores, registered_ptrs):
-            try:
-                store.unregister_buffer(ptr)
-            except Exception:
-                pass
-
-    except Exception as e:
-        print("ERROR: {}".format(e))
-    finally:
-        print(">>> Cleanup")
-        for store, ptr in zip(stores, registered_ptrs):
-            try:
-                store.unregister_buffer(ptr)
-            except Exception:
-                pass
-        stop_master(master_proc, master_log_file, master_log_path)
-        if mm:
-            mm.close()
-        gc.collect()
-        print(">>> Test complete")
+    del stores
+    del registered_ptrs
+    del buf
+    del mm
+    del global_stats
+    gc.collect()
+    print(">>> Test complete")
 
 
 if __name__ == "__main__":

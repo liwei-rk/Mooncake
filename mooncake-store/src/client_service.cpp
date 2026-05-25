@@ -477,11 +477,13 @@ std::optional<std::shared_ptr<Client>> Client::Create(
     // Initialize storage backend if storage_root_dir is valid
     auto config_response = client->master_client_.GetStorageConfig();
     if (!config_response) {
-        LOG(ERROR) << "Failed to get storage config from master";
+        LOG(ERROR) << "Failed to get storage config from master: "
+                   << toString(config_response.error());
         // Fallback to GetFsdir for backward compatibility
         auto response = client->master_client_.GetFsdir();
         if (!response) {
-            LOG(ERROR) << "Failed to get fsdir from master";
+            LOG(ERROR) << "Failed to get fsdir from master: "
+                       << toString(response.error());
         } else if (response.value().empty()) {
             LOG(INFO)
                 << "Storage root directory is not set. persisting data is "
