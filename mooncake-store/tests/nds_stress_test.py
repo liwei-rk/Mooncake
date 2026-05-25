@@ -498,6 +498,12 @@ def run_stress_test(args):
                 local_hostname = local_hostname[:-2] + ":{}".format(
                     find_free_port())
 
+            thread_buf_start = i * buffer_size_per_thread
+            thread_buf_end = thread_buf_start + buffer_size_per_thread
+            thread_buf = buf[thread_buf_start:thread_buf_end]
+            thread_buf[:] = full_pattern
+            thread_buf_ptr = thread_buf.ctypes.data
+
             retcode = store.setup(
                 local_hostname,
                 metadata_url,
@@ -505,18 +511,14 @@ def run_stress_test(args):
                 local_buffer_size,
                 args.protocol,
                 args.device_name,
-                master_addr
+                master_addr,
+                nds_mem_addr=thread_buf_ptr,
+                nds_mem_size=buffer_size_per_thread
             )
 
             if retcode:
                 print("ERROR: Store setup failed for thread {}, retcode={}".format(i, retcode))
                 return
-
-            thread_buf_start = i * buffer_size_per_thread
-            thread_buf_end = thread_buf_start + buffer_size_per_thread
-            thread_buf = buf[thread_buf_start:thread_buf_end]
-            thread_buf[:] = full_pattern
-            thread_buf_ptr = thread_buf.ctypes.data
 
             retcode = store.register_buffer(thread_buf_ptr, buffer_size_per_thread)
             if retcode:
