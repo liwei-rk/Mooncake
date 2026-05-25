@@ -171,9 +171,12 @@ def start_master(args):
     os.close(master_log_fd)
     master_log_file = open(master_log_path, "w", encoding="utf-8")
 
+    master_data_dir = tempfile.mkdtemp(prefix="nds_stress_data-")
     cmd = [
         master_binary,
         "--use_od=true",
+        "--root_fs_dir={}".format(master_data_dir),
+        "--cluster_id=nds_stress",
         "--enable_http_metadata_server=true",
         "--rpc_address=127.0.0.1",
         "--rpc_port={}".format(rpc_port),
@@ -208,7 +211,7 @@ def start_master(args):
 
     print("    Master started - RPC: 127.0.0.1:{}, Metadata: {}".format(
         rpc_port, metadata_url))
-    return master_proc, master_log_file, master_log_path, rpc_port, http_port
+    return master_proc, master_log_file, master_log_path, rpc_port, http_port, master_data_dir
 
 
 def stop_master(master_proc, master_log_file, master_log_path):
@@ -453,13 +456,14 @@ def run_stress_test(args):
     master_proc = None
     master_log_file = None
     master_log_path = None
+    master_data_dir = None
     stores = []
     registered_ptrs = []
     mm = None
     global_stats = None
 
     try:
-        master_proc, master_log_file, master_log_path, rpc_port, http_port = start_master(args)
+        master_proc, master_log_file, master_log_path, rpc_port, http_port, master_data_dir = start_master(args)
         metadata_url = "http://127.0.0.1:{}/metadata".format(http_port)
         master_addr = "127.0.0.1:{}".format(rpc_port)
 
@@ -583,6 +587,8 @@ def run_stress_test(args):
         registered_ptrs.clear()
         gc.collect()
         stop_master(master_proc, master_log_file, master_log_path)
+        if master_data_dir and os.path.exists(master_data_dir):
+            shutil.rmtree(master_data_dir, ignore_errors=True)
         if mm:
             mm.close()
         gc.collect()
