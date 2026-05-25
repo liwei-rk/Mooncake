@@ -250,14 +250,8 @@ def worker_thread(thread_idx, operation_mode, block_size, batch_size,
                 ret_codes = store.batch_put_from(batch_keys, buffer_ptrs, sizes)
                 all_success = all(rc == 0 for rc in ret_codes)
             elif operation_mode == "batch_get":
-                put_codes = store.batch_put_from(batch_keys, buffer_ptrs, sizes)
-                put_ok = all(rc == 0 for rc in put_codes)
-                if put_ok:
-                    ret_codes = store.batch_get_into(batch_keys, buffer_ptrs, sizes)
-                    all_success = all(rc > 0 for rc in ret_codes)
-                else:
-                    all_success = False
-                    ret_codes = put_codes
+                ret_codes = store.batch_get_into(batch_keys, buffer_ptrs, sizes)
+                all_success = all(rc > 0 for rc in ret_codes)
             latency = time.time() - start_time
 
             batch_seq += 1
