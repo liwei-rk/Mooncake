@@ -2228,6 +2228,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
     const std::vector<ObjectKey>& keys,
     std::vector<std::vector<Slice>>& batched_slices,
     const ReplicateConfig& config) {
+    LOG(ERROR) << "2222222222222222222222222";
     ReplicateConfig client_cfg = config;
     if (protocol_ == "cxl") {
         client_cfg.preferred_segment = local_hostname_;
