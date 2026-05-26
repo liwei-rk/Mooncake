@@ -156,7 +156,7 @@ def generate_batch_keys(entity_id, batch_seq, batch_size):
 def worker_process(worker_idx, operation_mode, block_size, batch_size,
                    metadata_url, master_addr, global_segment_size,
                    protocol, device_name, local_hostname_base, test_duration,
-                   stats_queue, stop_event, core_id):
+                   stats_queue, stop_event, core_id, args_ring_depth):
     buffer_size = batch_size * block_size
 
     if core_id >= 0:
@@ -209,12 +209,26 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
     stats_queue.put((MSG_SETUP_OK, worker_idx, 0))
 
     batch_seq = 0
+    ring_depth = args_ring_depth
     total_batch_bytes = batch_size * block_size
+    key_ring = [[] for _ in range(ring_depth)]
 
     try:
         while not stop_event.is_set():
             try:
+                ring_pos = batch_seq % ring_depth
+                phase = batch_seq // ring_depth
+
+                if phase > 0 and key_ring[ring_pos]:
+                    for old_key in key_ring[ring_pos]:
+                        try:
+                            store.remove(old_key)
+                        except Exception:
+                            pass
+                    key_ring[ring_pos] = []
+
                 batch_keys = generate_batch_keys(worker_idx, batch_seq, batch_size)
+                key_ring[ring_pos] = batch_keys
 
                 buffer_ptrs = []
                 sizes = []
@@ -391,6 +405,9 @@ def parse_args():
                         help="Global segment size in MB")
     parser.add_argument("--core-bind-start", type=int, default=5,
                         help="Start CPU core for binding (-1 to disable)")
+    parser.add_argument("--ring-depth", type=int, default=3,
+                        help="Number of consecutive batchPut batches with unique keys "
+                             "before removing the oldest batch's keys and reusing the slot")
     parser.add_argument("--master-binary", type=str, default="",
                         help="Path to mooncake_master binary (auto-detect if empty)")
     return parser.parse_args()
@@ -419,6 +436,7 @@ def run_stress_test(args):
     print("Batch size:          {}".format(batch_size))
     print("Block size:          {} ({:.2f} MB)".format(block_size, block_size / MB))
     print("Num workers:         {}".format(num_workers))
+    print("Ring depth:          {}".format(args.ring_depth))
     print("Test duration:       {}s".format(test_duration))
     print("Protocol:            {}".format(args.protocol))
     if device_list:
@@ -467,7 +485,8 @@ def run_stress_test(args):
                       global_segment_size,
                       args.protocol, worker_device,
                       args.local_hostname, test_duration,
-                      stats_queue, stop_event, core_id),
+                      stats_queue, stop_event, core_id,
+                      args.ring_depth),
                 daemon=True,
             )
             p.start()
