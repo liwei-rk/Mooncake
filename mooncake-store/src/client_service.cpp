@@ -1837,7 +1837,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
             auto submit_result = transfer_submitter_->submit_batch(
                 group.replicas, group.batched_slices, TransferRequest::WRITE);
             if (submit_result) {
-                mem_result.endpoint_futures[endpoint] = std::move(submit_result.value());
+                mem_result.endpoint_futures.emplace(endpoint, std::move(submit_result.value()));
             } else {
                 mem_result.endpoint_failed_op_indices[endpoint] = group.op_indices;
                 for (size_t idx : group.op_indices) {
