@@ -1748,6 +1748,12 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
 
 // === Pre-build: Collect info for disk & memory phases (read-only on ops) ===
 
+    std::vector<size_t> disk_op_indices;
+    std::vector<std::string> disk_keys;
+    std::vector<std::vector<Slice>> disk_slices;
+    std::vector<DiskDescriptor> disk_descriptors;
+
+#if 0
     struct EndpointGroup {
         std::vector<Replica::Descriptor> replicas;
         std::vector<std::vector<Slice>> batched_slices;
@@ -1755,12 +1761,8 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
         std::vector<size_t> replica_indices;
     };
     std::unordered_map<std::string, EndpointGroup> endpoint_groups;
-
-    std::vector<size_t> disk_op_indices;
-    std::vector<std::string> disk_keys;
-    std::vector<std::vector<Slice>> disk_slices;
-    std::vector<DiskDescriptor> disk_descriptors;
     std::set<size_t> has_memory_replica;
+#endif
 
     for (size_t i = 0; i < ops.size(); ++i) {
         auto& op = ops[i];
@@ -1778,6 +1780,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
             }
         }
 
+#if 0
         for (size_t replica_idx = 0; replica_idx < op.replicas.size();
              ++replica_idx) {
             const auto& replica = op.replicas[replica_idx];
@@ -1792,6 +1795,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                 group.replica_indices.emplace_back(replica_idx);
             }
         }
+#endif
     }
 
 // === Parallel execution: disk thread + memory thread ===
@@ -1803,6 +1807,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
     };
     DiskResult disk_result;
 
+#if 0
     struct MemResult {
         std::unordered_map<std::string, std::vector<size_t>> endpoint_failed_op_indices;
         std::unordered_map<std::string, TransferFuture> endpoint_futures;
@@ -1814,6 +1819,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
     };
     MemResult mem_result;
     mem_result.num_endpoint_groups = endpoint_groups.size();
+#endif
 
     auto disk_phase = [&]() {
         if (!HasDiskStorage() || disk_keys.empty()) return;
@@ -1829,6 +1835,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                   << disk_result.duration_us << " us";
     };
 
+#if 0
     auto memory_phase = [&]() {
         if (endpoint_groups.empty()) return;
         auto t_mem_start = std::chrono::steady_clock::now();
@@ -1871,11 +1878,10 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                   << " us, wait=" << mem_result.wait_duration_us << " us)"
                   << " | endpoint_groups=" << mem_result.num_endpoint_groups;
     };
+#endif
 
     std::thread t_disk(disk_phase);
-    std::thread t_mem(memory_phase);
     t_disk.join();
-    t_mem.join();
 
 // === Merge results (sequential, no data race) ===
 
@@ -1889,6 +1895,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
         }
     }
 
+#if 0
     // Apply memory submit failures
     for (auto& [endpoint, failed_indices] : mem_result.endpoint_failed_op_indices) {
         for (size_t idx : failed_indices) {
@@ -1909,8 +1916,6 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
     }
 
     // Apply successful memory futures to ops (only to ops not already errored)
-    // Futures were already waited on in memory thread; failed endpoints are
-    // tracked in mem_result.failed_op_indices
     for (auto& [endpoint, future] : mem_result.endpoint_futures) {
         auto& group = endpoint_groups[endpoint];
         for (size_t i = 0; i < group.op_indices.size(); ++i) {
@@ -1922,13 +1927,34 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
             }
         }
     }
+#endif
+
+    // For ops with memory replicas, set error since memory transfers are disabled
+    for (size_t i = 0; i < ops.size(); ++i) {
+        if (!ops[i].IsResolved()) {
+            for (const auto& replica : ops[i].replicas) {
+                if (replica.is_memory_replica()) {
+                    ops[i].SetError(ErrorCode::TRANSFER_FAIL,
+                                  "Memory transfer disabled");
+                    break;
+                }
+            }
+        }
+    }
 
     // For disk-only ops (no memory replica) that succeeded on disk,
     // add a completed TransferFuture so FinalizeBatchPut recognizes them
     for (size_t j = 0; j < disk_result.op_indices.size(); ++j) {
         size_t idx = disk_result.op_indices[j];
-        if (!ops[idx].IsResolved() && !has_memory_replica.count(idx)) {
-            if (j < disk_result.batch_results.size() &&
+        if (!ops[idx].IsResolved()) {
+            bool has_mem = false;
+            for (const auto& replica : ops[idx].replicas) {
+                if (replica.is_memory_replica()) {
+                    has_mem = true;
+                    break;
+                }
+            }
+            if (!has_mem && j < disk_result.batch_results.size() &&
                 !disk_result.batch_results[j].has_value()) {
                 auto state = std::make_shared<EmptyOperationState>();
                 ops[idx].pending_transfers.emplace_back(TransferFuture(state));
