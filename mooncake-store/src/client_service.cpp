@@ -1564,40 +1564,7 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
     // Record Put transfer latency (all replicas)
     auto t0_put = std::chrono::steady_clock::now();
 
-#if 0  // Memory-first mode: write memory replicas first, disk last
-    for (const auto& replica : start_result.value()) {
-        if (replica.is_memory_replica()) {
-            ErrorCode transfer_err = TransferWrite(replica, slices);
-            if (transfer_err != ErrorCode::OK) {
-                auto revoke_result =
-                    master_client_.PutRevoke(key, ReplicaType::MEMORY);
-                if (!revoke_result) {
-                    LOG(ERROR) << "Failed to revoke put operation";
-                    return tl::unexpected(revoke_result.error());
-                }
-                return tl::unexpected(transfer_err);
-            }
-        }
-    }
-
-    if (HasDiskStorage()) {
-        for (auto it = start_result.value().rbegin();
-             it != start_result.value().rend(); ++it) {
-            const auto& replica = *it;
-            if (replica.is_disk_replica()) {
-                auto disk_descriptor = replica.get_disk_descriptor();
-                auto results = PutBatchToLocalFile(
-                    {key}, {{slices}}, {disk_descriptor});
-                if (results[0].has_value()) {
-                    LOG(ERROR) << "Disk storage failed for key " << key
-                               << ": " << toString(results[0].value());
-                }
-                break;
-            }
-        }
-    }
-#else  // StorageBackend-first mode: write disk replica first, memory last
-    if (HasDiskStorage()) {
+if (HasDiskStorage()) {
         for (auto it = start_result.value().rbegin();
              it != start_result.value().rend(); ++it) {
             const auto& replica = *it;
@@ -1628,7 +1595,6 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
             }
         }
     }
-#endif
 
     auto us_put = std::chrono::duration_cast<std::chrono::microseconds>(
                       std::chrono::steady_clock::now() - t0_put)
@@ -1780,121 +1746,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
         return;
     }
 
-#if 0  // Memory-first mode: submit memory transfers first, disk second
-    // === Phase 1: Submit memory transfers ===
-    for (auto& op : ops) {
-        if (op.IsResolved() || op.replicas.empty()) continue;
-
-        bool all_transfers_submitted = true;
-        std::string failure_context;
-
-        for (size_t replica_idx = 0; replica_idx < op.replicas.size();
-             ++replica_idx) {
-            const auto& replica = op.replicas[replica_idx];
-            if (replica.is_memory_replica()) {
-                auto submit_result = transfer_submitter_->submit(
-                    replica, op.slices, TransferRequest::WRITE);
-                if (!submit_result) {
-                    failure_context = "Failed to submit transfer for replica " +
-                                      std::to_string(replica_idx);
-                    all_transfers_submitted = false;
-                    break;
-                }
-                op.pending_transfers.emplace_back(
-                    std::move(submit_result.value()));
-            }
-        }
-
-        if (!all_transfers_submitted) {
-            LOG(ERROR) << "Transfer submission failed for key " << op.key
-                       << ": " << failure_context;
-            op.SetError(ErrorCode::TRANSFER_FAIL, failure_context);
-            op.pending_transfers.clear();
-        } else {
-            VLOG(1) << "Successfully submitted " << op.pending_transfers.size()
-                    << " transfers for key " << op.key;
-        }
-    }
-
-    // === Phase 2: Collect disk-bound operations, batch them ===
-    if (HasDiskStorage()) {
-        std::vector<size_t> disk_op_indices;
-        std::vector<std::string> disk_keys;
-        std::vector<std::vector<Slice>> disk_slices;
-        std::vector<DiskDescriptor> disk_descriptors;
-
-        for (size_t i = 0; i < ops.size(); ++i) {
-            auto& op = ops[i];
-            if (op.IsResolved() || op.replicas.empty()) continue;
-
-            for (auto it = op.replicas.rbegin(); it != op.replicas.rend();
-                 ++it) {
-                if (it->is_disk_replica()) {
-                    disk_op_indices.push_back(i);
-                    disk_keys.push_back(op.key);
-                    disk_slices.push_back(op.slices);
-                    disk_descriptors.push_back(it->get_disk_descriptor());
-                    break;
-                }
-            }
-        }
-
-        if (!disk_keys.empty()) {
-            auto batch_results = PutBatchToLocalFile(
-                disk_keys, disk_slices, disk_descriptors);
-            for (size_t j = 0; j < disk_op_indices.size(); ++j) {
-                if (batch_results[j].has_value()) {
-                    ops[disk_op_indices[j]].SetError(
-                        batch_results[j].value(),
-                        "Disk storage batch failed");
-                }
-            }
-        }
-    }
-#else  // StorageBackend-first mode: disk first, memory second
-    // === Phase 1: Collect all disk-bound operations, batch them ===
-    if (HasDiskStorage()) {
-        auto t_disk_start = std::chrono::steady_clock::now();
-        std::vector<size_t> disk_op_indices;
-        std::vector<std::string> disk_keys;
-        std::vector<std::vector<Slice>> disk_slices;
-        std::vector<DiskDescriptor> disk_descriptors;
-
-        for (size_t i = 0; i < ops.size(); ++i) {
-            auto& op = ops[i];
-            if (op.IsResolved() || op.replicas.empty()) continue;
-
-            for (auto it = op.replicas.rbegin(); it != op.replicas.rend();
-                 ++it) {
-                if (it->is_disk_replica()) {
-                    disk_op_indices.push_back(i);
-                    disk_keys.push_back(op.key);
-                    disk_slices.push_back(op.slices);
-                    disk_descriptors.push_back(it->get_disk_descriptor());
-                    break;  // Only one disk replica is needed
-                }
-            }
-        }
-
-        if (!disk_keys.empty()) {
-            auto batch_results = PutBatchToLocalFile(
-                disk_keys, disk_slices, disk_descriptors);
-            for (size_t j = 0; j < disk_op_indices.size(); ++j) {
-                if (batch_results[j].has_value()) {
-                    ops[disk_op_indices[j]].SetError(
-                        batch_results[j].value(),
-                        "Disk storage batch failed");
-                }
-            }
-        }
-        auto t_disk_end = std::chrono::steady_clock::now();
-        LOG(INFO) << "[BatchPut] SubmitTransfers disk phase (NDS write + PutEnd): "
-                  << std::chrono::duration_cast<std::chrono::microseconds>(
-                         t_disk_end - t_disk_start).count() << " us";
-    }
-
-// === Phase 2: Submit memory transfers grouped by endpoint ===
-    auto t_mem_start = std::chrono::steady_clock::now();
+// === Pre-build: Collect info for disk & memory phases (read-only on ops) ===
 
     struct EndpointGroup {
         std::vector<Replica::Descriptor> replicas;
@@ -1904,55 +1756,193 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
     };
     std::unordered_map<std::string, EndpointGroup> endpoint_groups;
 
-    for (size_t op_idx = 0; op_idx < ops.size(); ++op_idx) {
-        auto& op = ops[op_idx];
-        if (op.IsResolved()) continue;
-        if (op.replicas.empty()) {
-            op.SetError(ErrorCode::INTERNAL_ERROR,
-                        "No replicas available for transfer");
-            continue;
+    std::vector<size_t> disk_op_indices;
+    std::vector<std::string> disk_keys;
+    std::vector<std::vector<Slice>> disk_slices;
+    std::vector<DiskDescriptor> disk_descriptors;
+    std::set<size_t> has_memory_replica;
+
+    for (size_t i = 0; i < ops.size(); ++i) {
+        auto& op = ops[i];
+        if (op.IsResolved() || op.replicas.empty()) continue;
+
+        bool found_disk = false;
+        for (auto it = op.replicas.rbegin(); it != op.replicas.rend(); ++it) {
+            if (it->is_disk_replica() && !found_disk) {
+                disk_op_indices.push_back(i);
+                disk_keys.push_back(op.key);
+                disk_slices.push_back(op.slices);
+                disk_descriptors.push_back(it->get_disk_descriptor());
+                found_disk = true;
+                break;
+            }
         }
+
         for (size_t replica_idx = 0; replica_idx < op.replicas.size();
              ++replica_idx) {
             const auto& replica = op.replicas[replica_idx];
             if (replica.is_memory_replica()) {
+                has_memory_replica.insert(i);
                 auto& mem_desc = replica.get_memory_descriptor();
                 auto endpoint = mem_desc.buffer_descriptor.transport_endpoint_;
                 auto& group = endpoint_groups[endpoint];
                 group.replicas.emplace_back(replica);
                 group.batched_slices.emplace_back(op.slices);
-                group.op_indices.emplace_back(op_idx);
+                group.op_indices.emplace_back(i);
                 group.replica_indices.emplace_back(replica_idx);
             }
         }
     }
 
-    for (auto& [endpoint, group] : endpoint_groups) {
-        auto submit_result = transfer_submitter_->submit_batch(
-            group.replicas, group.batched_slices, TransferRequest::WRITE);
-        if (submit_result) {
-            for (size_t i = 0; i < group.op_indices.size(); ++i) {
-                auto& op = ops[group.op_indices[i]];
-                if (!op.IsResolved()) {
-                    op.pending_transfers.emplace_back(submit_result.value());
+// === Parallel execution: disk thread + memory thread ===
+
+    struct DiskResult {
+        std::vector<size_t> op_indices;
+        std::vector<std::optional<ErrorCode>> batch_results;
+        int64_t duration_us = 0;
+    };
+    DiskResult disk_result;
+
+    struct MemResult {
+        std::unordered_map<std::string, std::vector<size_t>> endpoint_failed_op_indices;
+        std::unordered_map<std::string, TransferFuture> endpoint_futures;
+        std::set<size_t> failed_op_indices;
+        int64_t submit_duration_us = 0;
+        int64_t wait_duration_us = 0;
+        int64_t total_duration_us = 0;
+        size_t num_endpoint_groups = 0;
+    };
+    MemResult mem_result;
+    mem_result.num_endpoint_groups = endpoint_groups.size();
+
+    auto disk_phase = [&]() {
+        if (!HasDiskStorage() || disk_keys.empty()) return;
+        auto t_disk_start = std::chrono::steady_clock::now();
+        auto batch_results = PutBatchToLocalFile(
+            disk_keys, disk_slices, disk_descriptors);
+        disk_result.op_indices = disk_op_indices;
+        disk_result.batch_results = batch_results;
+        auto t_disk_end = std::chrono::steady_clock::now();
+        disk_result.duration_us = std::chrono::duration_cast<
+            std::chrono::microseconds>(t_disk_end - t_disk_start).count();
+        LOG(INFO) << "[BatchPut] SubmitTransfers disk thread (NDS write + PutEnd): "
+                  << disk_result.duration_us << " us";
+    };
+
+    auto memory_phase = [&]() {
+        if (endpoint_groups.empty()) return;
+        auto t_mem_start = std::chrono::steady_clock::now();
+
+        for (auto& [endpoint, group] : endpoint_groups) {
+            auto submit_result = transfer_submitter_->submit_batch(
+                group.replicas, group.batched_slices, TransferRequest::WRITE);
+            if (submit_result) {
+                mem_result.endpoint_futures[endpoint] = std::move(submit_result.value());
+            } else {
+                mem_result.endpoint_failed_op_indices[endpoint] = group.op_indices;
+                for (size_t idx : group.op_indices) {
+                    mem_result.failed_op_indices.insert(idx);
                 }
             }
-        } else {
-            for (size_t i = 0; i < group.op_indices.size(); ++i) {
-                auto& op = ops[group.op_indices[i]];
-                op.SetError(ErrorCode::TRANSFER_FAIL,
-                            "Batch transfer submission failed for endpoint " +
-                                endpoint);
+        }
+
+        auto t_submit_end = std::chrono::steady_clock::now();
+        mem_result.submit_duration_us = std::chrono::duration_cast<
+            std::chrono::microseconds>(t_submit_end - t_mem_start).count();
+
+        for (auto& [endpoint, future] : mem_result.endpoint_futures) {
+            ErrorCode result = future.get();
+            if (result != ErrorCode::OK) {
+                auto& group = endpoint_groups[endpoint];
+                for (size_t idx : group.op_indices) {
+                    mem_result.failed_op_indices.insert(idx);
+                }
+            }
+        }
+
+        auto t_mem_end = std::chrono::steady_clock::now();
+        mem_result.wait_duration_us = std::chrono::duration_cast<
+            std::chrono::microseconds>(t_mem_end - t_submit_end).count();
+        mem_result.total_duration_us = std::chrono::duration_cast<
+            std::chrono::microseconds>(t_mem_end - t_mem_start).count();
+        LOG(INFO) << "[BatchPut] SubmitTransfers memory thread (submit+wait): "
+                  << mem_result.total_duration_us << " us"
+                  << " (submit=" << mem_result.submit_duration_us
+                  << " us, wait=" << mem_result.wait_duration_us << " us)"
+                  << " | endpoint_groups=" << mem_result.num_endpoint_groups;
+    };
+
+    std::thread t_disk(disk_phase);
+    std::thread t_mem(memory_phase);
+    t_disk.join();
+    t_mem.join();
+
+// === Merge results (sequential, no data race) ===
+
+    // Apply disk errors first
+    for (size_t j = 0; j < disk_result.op_indices.size(); ++j) {
+        if (j < disk_result.batch_results.size() &&
+            disk_result.batch_results[j].has_value()) {
+            ops[disk_result.op_indices[j]].SetError(
+                disk_result.batch_results[j].value(),
+                "Disk storage batch failed");
+        }
+    }
+
+    // Apply memory submit failures
+    for (auto& [endpoint, failed_indices] : mem_result.endpoint_failed_op_indices) {
+        for (size_t idx : failed_indices) {
+            if (!ops[idx].IsResolved()) {
+                ops[idx].SetError(ErrorCode::TRANSFER_FAIL,
+                                "Batch transfer submission failed for endpoint " +
+                                    endpoint);
             }
         }
     }
 
-    auto t_mem_end = std::chrono::steady_clock::now();
-    LOG(INFO) << "[BatchPut] SubmitTransfers memory phase (submit_batch by endpoint, async): "
-              << std::chrono::duration_cast<std::chrono::microseconds>(
-                     t_mem_end - t_mem_start).count() << " us"
-              << " | endpoint_groups=" << endpoint_groups.size();
-#endif
+    // Apply memory wait failures
+    for (size_t idx : mem_result.failed_op_indices) {
+        if (!ops[idx].IsResolved()) {
+            ops[idx].SetError(ErrorCode::TRANSFER_FAIL,
+                            "Memory transfer completed with error");
+        }
+    }
+
+    // Apply successful memory futures to ops (only to ops not already errored)
+    // Futures were already waited on in memory thread; failed endpoints are
+    // tracked in mem_result.failed_op_indices
+    for (auto& [endpoint, future] : mem_result.endpoint_futures) {
+        auto& group = endpoint_groups[endpoint];
+        for (size_t i = 0; i < group.op_indices.size(); ++i) {
+            size_t idx = group.op_indices[i];
+            auto& op = ops[idx];
+            if (!op.IsResolved() &&
+                !mem_result.failed_op_indices.count(idx)) {
+                op.pending_transfers.emplace_back(future);
+            }
+        }
+    }
+
+    // For disk-only ops (no memory replica) that succeeded on disk,
+    // add a completed TransferFuture so FinalizeBatchPut recognizes them
+    for (size_t j = 0; j < disk_result.op_indices.size(); ++j) {
+        size_t idx = disk_result.op_indices[j];
+        if (!ops[idx].IsResolved() && !has_memory_replica.count(idx)) {
+            if (j < disk_result.batch_results.size() &&
+                !disk_result.batch_results[j].has_value()) {
+                auto state = std::make_shared<EmptyOperationState>();
+                ops[idx].pending_transfers.emplace_back(TransferFuture(state));
+            }
+        }
+    }
+
+    // For ops with no replicas at all, set error
+    for (size_t i = 0; i < ops.size(); ++i) {
+        if (!ops[i].IsResolved() && ops[i].replicas.empty()) {
+            ops[i].SetError(ErrorCode::INTERNAL_ERROR,
+                          "No replicas available for transfer");
+        }
+    }
 }
 
 void Client::WaitForTransfers(std::vector<PutOperation>& ops) {
@@ -2283,19 +2273,12 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
     t0 = std::chrono::steady_clock::now();
     SubmitTransfers(ops);
     auto t_submit_end = std::chrono::steady_clock::now();
-    LOG(INFO) << "[BatchPut] SubmitTransfers (disk+memory submit): "
+    LOG(INFO) << "[BatchPut] SubmitTransfers (parallel disk+memory, includes wait): "
               << std::chrono::duration_cast<std::chrono::microseconds>(
                      t_submit_end - t0).count() << " us";
 
-    t0 = std::chrono::steady_clock::now();
-    WaitForTransfers(ops);
-    auto t_wait_end = std::chrono::steady_clock::now();
-    LOG(INFO) << "[BatchPut] WaitForTransfers (transfer completion): "
-              << std::chrono::duration_cast<std::chrono::microseconds>(
-                     t_wait_end - t0).count() << " us";
-
     auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-                  t_wait_end - t_submit_end)
+                  t_submit_end - t0)
                   .count();
     if (metrics_) {
         metrics_->transfer_metric.batch_put_latency_us.observe(us);
