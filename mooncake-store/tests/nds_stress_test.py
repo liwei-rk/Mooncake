@@ -156,8 +156,16 @@ def generate_batch_keys(entity_id, batch_seq, batch_size):
 def worker_process(worker_idx, operation_mode, block_size, batch_size,
                    metadata_url, master_addr, global_segment_size,
                    protocol, device_name, local_hostname_base, test_duration,
-                   stats_queue, stop_event):
+                   stats_queue, stop_event, core_id):
     buffer_size = batch_size * block_size
+
+    if core_id >= 0:
+        try:
+            os.sched_setaffinity(0, {core_id})
+            logger.info("Worker {} bound to core {}".format(worker_idx, core_id))
+        except Exception as e:
+            logger.warning("Worker {} failed to bind core {}: {}".format(
+                worker_idx, core_id, e))
 
     mooncake.store.init_glog()
     mooncake.store.set_vlog_level(0)
@@ -254,6 +262,7 @@ class GlobalStats:
     def __init__(self, num_workers):
         self.start_time = time.time()
         self.bw_start_time = time.time()
+        self.peak_bw = 0.0
         self.worker_stats = {}
         for i in range(num_workers):
             self.worker_stats[i] = {
@@ -302,6 +311,8 @@ class GlobalStats:
         total_errors = sum(s["error_count"] for s in self.worker_stats.values())
         avg_lat = total_lat / total_ops if total_ops > 0 else 0
         bw = total_bytes / elapsed / GB if elapsed > 0 else 0
+        if bw > self.peak_bw:
+            self.peak_bw = bw
         self.bw_start_time = time.time()
         for s in self.worker_stats.values():
             s["io_count"] = 0
@@ -348,6 +359,7 @@ def print_final_report(global_stats, args):
     print("Error rate:          {:12.3f}%".format(error_rate))
     print("-" * 80)
     print("Avg bandwidth:       {:5.2f} GB/s".format(bw_gbs))
+    print("Peak bandwidth:      {:5.2f} GB/s".format(global_stats.peak_bw))
     print("Avg latency:         {:.6f}s".format(avg_lat))
     print("=" * 80)
 
@@ -371,14 +383,24 @@ def parse_args():
     parser.add_argument("--protocol", type=str, default="tcp",
                         help="Transfer protocol")
     parser.add_argument("--device-name", type=str, default="",
-                        help="RDMA device name (empty for TCP)")
+                        help="RDMA device name(s), comma-separated for multiple devices "
+                             "(empty for TCP). Workers round-robin across devices.")
     parser.add_argument("--local-hostname", type=str, default="127.0.0.1:0",
                         help="Local hostname (port 0 = auto-detect)")
-    parser.add_argument("--global-segment-size", type=int, default=256,
+    parser.add_argument("--global-segment-size", type=int, default=4096,
                         help="Global segment size in MB")
+    parser.add_argument("--core-bind-start", type=int, default=5,
+                        help="Start CPU core for binding (-1 to disable)")
     parser.add_argument("--master-binary", type=str, default="",
                         help="Path to mooncake_master binary (auto-detect if empty)")
     return parser.parse_args()
+
+
+def parse_device_names(device_name_arg):
+    if not device_name_arg:
+        return []
+    devices = [d.strip() for d in device_name_arg.split(",") if d.strip()]
+    return devices
 
 
 def run_stress_test(args):
@@ -388,6 +410,7 @@ def run_stress_test(args):
     num_workers = args.num_workers
     test_duration = args.duration
     monitor_interval = args.monitor_interval
+    device_list = parse_device_names(args.device_name)
 
     print("=" * 80)
     print("NDS STRESS TEST (Multi-Process)".center(80))
@@ -398,6 +421,10 @@ def run_stress_test(args):
     print("Num workers:         {}".format(num_workers))
     print("Test duration:       {}s".format(test_duration))
     print("Protocol:            {}".format(args.protocol))
+    if device_list:
+        print("RDMA devices:        {} (round-robin)".format(", ".join(device_list)))
+    if args.core_bind_start >= 0:
+        print("Core binding:        from core {} (sequential)".format(args.core_bind_start))
     print("=" * 80)
 
     master_proc = None
@@ -423,14 +450,24 @@ def run_stress_test(args):
             if operation_mode == "mixed":
                 worker_mode = "batch_put" if i % 2 == 0 else "batch_get"
 
+            if device_list:
+                worker_device = device_list[i % len(device_list)]
+            else:
+                worker_device = args.device_name
+
+            if args.core_bind_start >= 0:
+                core_id = args.core_bind_start + i
+            else:
+                core_id = -1
+
             p = multiprocessing.Process(
                 target=worker_process,
                 args=(i, worker_mode, block_size, batch_size,
                       metadata_url, master_addr,
                       global_segment_size,
-                      args.protocol, args.device_name,
+                      args.protocol, worker_device,
                       args.local_hostname, test_duration,
-                      stats_queue, stop_event),
+                      stats_queue, stop_event, core_id),
                 daemon=True,
             )
             p.start()
