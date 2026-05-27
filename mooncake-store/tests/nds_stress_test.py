@@ -219,13 +219,13 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
                 ring_pos = batch_seq % ring_depth
                 phase = batch_seq // ring_depth
 
-                if phase > 0 and key_ring[ring_pos]:
-                    for old_key in key_ring[ring_pos]:
-                        try:
-                            store.remove(old_key)
-                        except Exception:
-                            pass
-                    key_ring[ring_pos] = []
+                # if phase > 0 and key_ring[ring_pos]:
+                #     for old_key in key_ring[ring_pos]:
+                #         try:
+                #             store.remove(old_key)
+                #         except Exception:
+                #             pass
+                #     key_ring[ring_pos] = []
 
                 batch_keys = generate_batch_keys(worker_idx, batch_seq, batch_size)
                 key_ring[ring_pos] = batch_keys
