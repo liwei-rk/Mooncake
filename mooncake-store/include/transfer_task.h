@@ -282,7 +282,7 @@ struct MemcpyTask {
  */
 class MemcpyWorkerPool {
    public:
-    explicit MemcpyWorkerPool();
+    explicit MemcpyWorkerPool(int num_workers = 4);
     ~MemcpyWorkerPool();
 
     // Non-copyable, non-movable

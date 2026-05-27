@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <netdb.h>
+#include <arpa/inet.h>
 #include "transfer_engine.h"
 #include "transport/transport.h"
 
@@ -120,15 +122,16 @@ void FilereadWorkerPool::workerThread() {
 // MemcpyWorkerPool Implementation
 // ============================================================================
 // Since memcpy is bound by memory bandwidth, we only need one worker thread.
-constexpr int kDefaultMemcpyWorkers = 1;
+constexpr int kDefaultMemcpyWorkers = 4;
 
-MemcpyWorkerPool::MemcpyWorkerPool() : shutdown_(false) {
-    VLOG(1) << "Creating MemcpyWorkerPool with " << kDefaultMemcpyWorkers
+MemcpyWorkerPool::MemcpyWorkerPool(int num_workers)
+    : shutdown_(false) {
+    if (num_workers <= 0) num_workers = kDefaultMemcpyWorkers;
+    VLOG(1) << "Creating MemcpyWorkerPool with " << num_workers
             << " workers";
 
-    // Start worker threads
-    workers_.reserve(kDefaultMemcpyWorkers);
-    for (int i = 0; i < kDefaultMemcpyWorkers; ++i) {
+    workers_.reserve(num_workers);
+    for (int i = 0; i < num_workers; ++i) {
         workers_.emplace_back(&MemcpyWorkerPool::workerThread, this);
     }
 }
@@ -406,7 +409,8 @@ TransferSubmitter::TransferSubmitter(TransferEngine& engine,
                                      std::shared_ptr<StorageBackend>& backend,
                                      TransferMetric* transfer_metric)
     : engine_(engine),
-      memcpy_pool_(std::make_unique<MemcpyWorkerPool>()),
+      memcpy_pool_(std::make_unique<MemcpyWorkerPool>(
+          GetEnvOr<int>("MC_MEMCPY_WORKERS", kDefaultMemcpyWorkers))),
       fileread_pool_(std::make_unique<FilereadWorkerPool>(backend)),
       transfer_metric_(transfer_metric) {
     // Read MC_STORE_MEMCPY environment variable, default to false (disabled)
@@ -784,15 +788,46 @@ std::string extractIpAddress(const std::string& endpoint) {
 
 bool TransferSubmitter::isLocalTransfer(
     const AllocatedBuffer::Descriptor& handle) const {
-    std::string local_ep = engine_.getLocalIpAndPort();
-    std::string local_ip = extractIpAddress(local_ep);
-
-    if (!local_ep.empty()) {
-        std::string handle_ip = extractIpAddress(handle.transport_endpoint_);
-        return !handle.transport_endpoint_.empty() && handle_ip == local_ip;
+    if (handle.transport_endpoint_.empty()) {
+        return false;
     }
 
-    // Without a local IP we cannot prove locality; disable memcpy.
+    std::string local_ep = engine_.getLocalIpAndPort();
+    if (local_ep.empty()) {
+        return false;
+    }
+
+    std::string local_ip = extractIpAddress(local_ep);
+    std::string handle_ip = extractIpAddress(handle.transport_endpoint_);
+
+    if (handle_ip == local_ip) {
+        return true;
+    }
+
+    // Handle hostname vs IP mismatch: resolve handle hostname to IP
+    struct addrinfo hints = {}, *result = nullptr;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    int rc = getaddrinfo(handle_ip.c_str(), nullptr, &hints, &result);
+    if (rc == 0 && result) {
+        for (auto* rp = result; rp != nullptr; rp = rp->ai_next) {
+            char addr_str[INET6_ADDRSTRLEN] = {};
+            void* addr_ptr = nullptr;
+            if (rp->ai_family == AF_INET) {
+                addr_ptr = &reinterpret_cast<sockaddr_in*>(rp->ai_addr)->sin_addr;
+            } else if (rp->ai_family == AF_INET6) {
+                addr_ptr = &reinterpret_cast<sockaddr_in6*>(rp->ai_addr)->sin6_addr;
+            }
+            if (addr_ptr && inet_ntop(rp->ai_family, addr_ptr, addr_str, sizeof(addr_str))) {
+                if (std::string(addr_str) == local_ip) {
+                    freeaddrinfo(result);
+                    return true;
+                }
+            }
+        }
+        freeaddrinfo(result);
+    }
+
     return false;
 }
 
