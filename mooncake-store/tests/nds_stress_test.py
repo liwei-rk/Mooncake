@@ -148,15 +148,15 @@ def stop_master(master_proc, master_log_file, master_log_path):
     print("    Master stopped")
 
 
-def generate_batch_keys(entity_id, batch_seq, batch_size):
-    return ["w{}_b{}_k{}".format(entity_id, batch_seq, i)
+def generate_batch_keys(entity_id, slot_idx, batch_size):
+    return ["w{}_s{}_k{}".format(entity_id, slot_idx, i)
             for i in range(batch_size)]
 
 
 def worker_process(worker_idx, operation_mode, block_size, batch_size,
                    metadata_url, master_addr, global_segment_size,
                    protocol, device_name, local_hostname_base, test_duration,
-                   stats_queue, stop_event, core_id):
+                   stats_queue, stop_event, core_id, depth):
     buffer_size = batch_size * block_size
 
     if core_id >= 0:
@@ -208,13 +208,23 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
 
     stats_queue.put((MSG_SETUP_OK, worker_idx, 0))
 
-    batch_seq = 0
+    num_slots = depth if depth > 0 else 1
+    slot_keys = [generate_batch_keys(worker_idx, s, batch_size)
+                 for s in range(num_slots)]
+    slot_written = [False] * num_slots
+
+    iteration = 0
     total_batch_bytes = batch_size * block_size
 
     try:
         while not stop_event.is_set():
             try:
-                batch_keys = generate_batch_keys(worker_idx, batch_seq, batch_size)
+                if depth > 0:
+                    slot = iteration % depth
+                    batch_keys = slot_keys[slot]
+                else:
+                    batch_keys = generate_batch_keys(
+                        worker_idx, iteration, batch_size)
 
                 buffer_ptrs = []
                 sizes = []
@@ -223,16 +233,29 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
                     buffer_ptrs.append(buf_ptr + offset)
                     sizes.append(block_size)
 
+                if depth > 0 and slot_written[slot] and operation_mode == "batch_put":
+                    try:
+                        removed = store.remove_by_regex(
+                            "^w{}_s{}_k\\d+$".format(worker_idx, slot),
+                            force=True)
+                        logger.debug("Worker {} removed {} keys from slot {}".format(
+                            worker_idx, removed, slot))
+                    except Exception as e:
+                        logger.warning("Worker {} remove slot {} failed: {}".format(
+                            worker_idx, slot, e))
+
                 start_time = time.time()
                 if operation_mode == "batch_put":
                     ret_codes = store.batch_put_from(batch_keys, buffer_ptrs, sizes)
                     all_success = all(rc == 0 for rc in ret_codes)
+                    if all_success and depth > 0:
+                        slot_written[slot] = True
                 elif operation_mode == "batch_get":
                     ret_codes = store.batch_get_into(batch_keys, buffer_ptrs, sizes)
                     all_success = all(rc > 0 for rc in ret_codes)
                 latency = time.time() - start_time
 
-                batch_seq += 1
+                iteration += 1
 
                 stats_queue.put((MSG_BATCH_RESULT, worker_idx, all_success,
                                  total_batch_bytes, latency))
@@ -249,6 +272,13 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
                 stats_queue.put((MSG_BATCH_RESULT, worker_idx, False, 0, 0))
                 break
     finally:
+        for s in range(num_slots):
+            if slot_written[s]:
+                try:
+                    store.remove_by_regex(
+                        "^w{}_s{}_k\\d+$".format(worker_idx, s), force=True)
+                except Exception:
+                    pass
         try:
             store.unregister_buffer(buf_ptr)
         except Exception:
@@ -343,6 +373,7 @@ def print_final_report(global_stats, args):
     print("Batch size:          {}".format(args.batch_size))
     print("Block size:          {} ({:.2f} MB)".format(args.block_size, args.block_size / MB))
     print("Num workers:         {}".format(args.num_workers))
+    print("Depth:               {}".format(args.depth))
     print("-" * 80)
 
     total_bytes = global_stats.get_all_bytes()
@@ -389,6 +420,12 @@ def parse_args():
                         help="Local hostname (port 0 = auto-detect)")
     parser.add_argument("--global-segment-size", type=int, default=4096,
                         help="Global segment size in MB")
+    parser.add_argument("--depth", type=int, default=1,
+                        help="Ring buffer depth: number of key batches to cycle through. "
+                             "depth=1 means reuse the same batch keys every iteration "
+                             "(remove-before-put). depth=0 means infinite unique keys "
+                             "(no removal, memory will fill up). Each worker's keys "
+                             "are independent (w{worker}_s{slot}_k{idx}).")
     parser.add_argument("--core-bind-start", type=int, default=5,
                         help="Start CPU core for binding (-1 to disable)")
     parser.add_argument("--master-binary", type=str, default="",
@@ -411,6 +448,7 @@ def run_stress_test(args):
     test_duration = args.duration
     monitor_interval = args.monitor_interval
     device_list = parse_device_names(args.device_name)
+    depth = args.depth
 
     print("=" * 80)
     print("NDS STRESS TEST (Multi-Process)".center(80))
@@ -421,6 +459,13 @@ def run_stress_test(args):
     print("Num workers:         {}".format(num_workers))
     print("Test duration:       {}s".format(test_duration))
     print("Protocol:            {}".format(args.protocol))
+    print("Depth:               {} (ring buffer slots)".format(depth))
+    if depth > 0:
+        print("Key space per worker: {} x {} = {} keys ({:.2f} MB)".format(
+            depth, batch_size, depth * batch_size,
+            depth * batch_size * block_size / MB))
+    else:
+        print("Key space:           infinite (memory will fill up)")
     if device_list:
         print("RDMA devices:        {} (round-robin)".format(", ".join(device_list)))
     if args.core_bind_start >= 0:
@@ -467,7 +512,8 @@ def run_stress_test(args):
                       global_segment_size,
                       args.protocol, worker_device,
                       args.local_hostname, test_duration,
-                      stats_queue, stop_event, core_id),
+                      stats_queue, stop_event, core_id,
+                      depth),
                 daemon=True,
             )
             p.start()
