@@ -153,10 +153,23 @@ def generate_batch_keys(entity_id, slot_idx, batch_size):
             for i in range(batch_size)]
 
 
+def _remove_slot(store, worker_idx, slot):
+    regex = "^w{}_s{}_k\\d+$".format(worker_idx, slot)
+    try:
+        removed = store.remove_by_regex(regex, force=True)
+        logger.debug("Worker {} removed {} keys from slot {}".format(
+            worker_idx, removed, slot))
+        return removed
+    except Exception as e:
+        logger.warning("Worker {} remove slot {} failed: {}".format(
+            worker_idx, slot, e))
+        return 0
+
+
 def worker_process(worker_idx, operation_mode, block_size, batch_size,
                    metadata_url, master_addr, global_segment_size,
                    protocol, device_name, local_hostname_base, test_duration,
-                   stats_queue, stop_event, core_id, depth):
+                   stats_queue, stop_event, core_id, depth, eviction_window):
     buffer_size = batch_size * block_size
 
     if core_id >= 0:
@@ -211,7 +224,8 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
     num_slots = depth if depth > 0 else 1
     slot_keys = [generate_batch_keys(worker_idx, s, batch_size)
                  for s in range(num_slots)]
-    slot_written = [False] * num_slots
+    alive_slots = {}
+    alive_order = []
 
     iteration = 0
     total_batch_bytes = batch_size * block_size
@@ -223,6 +237,7 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
                     slot = iteration % depth
                     batch_keys = slot_keys[slot]
                 else:
+                    slot = iteration
                     batch_keys = generate_batch_keys(
                         worker_idx, iteration, batch_size)
 
@@ -233,27 +248,30 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
                     buffer_ptrs.append(buf_ptr + offset)
                     sizes.append(block_size)
 
-                if depth > 0 and slot_written[slot] and operation_mode == "batch_put":
-                    try:
-                        removed = store.remove_by_regex(
-                            "^w{}_s{}_k\\d+$".format(worker_idx, slot),
-                            force=True)
-                        logger.debug("Worker {} removed {} keys from slot {}".format(
-                            worker_idx, removed, slot))
-                    except Exception as e:
-                        logger.warning("Worker {} remove slot {} failed: {}".format(
-                            worker_idx, slot, e))
+                if operation_mode == "batch_put":
+                    if slot in alive_slots:
+                        _remove_slot(store, worker_idx, slot)
+                        alive_order.remove(slot)
+                        del alive_slots[slot]
 
                 start_time = time.time()
                 if operation_mode == "batch_put":
                     ret_codes = store.batch_put_from(batch_keys, buffer_ptrs, sizes)
                     all_success = all(rc == 0 for rc in ret_codes)
-                    if all_success and depth > 0:
-                        slot_written[slot] = True
+                    if all_success:
+                        alive_slots[slot] = iteration
+                        alive_order.append(slot)
                 elif operation_mode == "batch_get":
                     ret_codes = store.batch_get_into(batch_keys, buffer_ptrs, sizes)
                     all_success = all(rc > 0 for rc in ret_codes)
                 latency = time.time() - start_time
+
+                if operation_mode == "batch_put" and eviction_window > 0:
+                    while len(alive_slots) > eviction_window:
+                        oldest_slot = alive_order[0]
+                        _remove_slot(store, worker_idx, oldest_slot)
+                        alive_order.pop(0)
+                        del alive_slots[oldest_slot]
 
                 iteration += 1
 
@@ -272,13 +290,12 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
                 stats_queue.put((MSG_BATCH_RESULT, worker_idx, False, 0, 0))
                 break
     finally:
-        for s in range(num_slots):
-            if slot_written[s]:
-                try:
-                    store.remove_by_regex(
-                        "^w{}_s{}_k\\d+$".format(worker_idx, s), force=True)
-                except Exception:
-                    pass
+        for slot in list(alive_slots.keys()):
+            try:
+                store.remove_by_regex(
+                    "^w{}_s{}_k\\d+$".format(worker_idx, slot), force=True)
+            except Exception:
+                pass
         try:
             store.unregister_buffer(buf_ptr)
         except Exception:
@@ -374,6 +391,7 @@ def print_final_report(global_stats, args):
     print("Block size:          {} ({:.2f} MB)".format(args.block_size, args.block_size / MB))
     print("Num workers:         {}".format(args.num_workers))
     print("Depth:               {}".format(args.depth))
+    print("Eviction window:     {}".format(args.eviction_window))
     print("-" * 80)
 
     total_bytes = global_stats.get_all_bytes()
@@ -424,8 +442,14 @@ def parse_args():
                         help="Ring buffer depth: number of key batches to cycle through. "
                              "depth=1 means reuse the same batch keys every iteration "
                              "(remove-before-put). depth=0 means infinite unique keys "
-                             "(no removal, memory will fill up). Each worker's keys "
-                             "are independent (w{worker}_s{slot}_k{idx}).")
+                             "(no ring buffer). Each worker's keys are independent "
+                             "(w{worker}_s{slot}_k{idx}).")
+    parser.add_argument("--eviction-window", type=int, default=1,
+                        help="Max number of alive batches in memory at any time. "
+                             "When exceeded, oldest batch is removed (master metadata + "
+                             "shared memory pool + NDS storage). eviction_window=0 means "
+                             "no eviction (memory will fill up). Must be <= depth when "
+                             "depth>0, or any positive value when depth=0.")
     parser.add_argument("--core-bind-start", type=int, default=5,
                         help="Start CPU core for binding (-1 to disable)")
     parser.add_argument("--master-binary", type=str, default="",
@@ -449,6 +473,7 @@ def run_stress_test(args):
     monitor_interval = args.monitor_interval
     device_list = parse_device_names(args.device_name)
     depth = args.depth
+    eviction_window = args.eviction_window
 
     print("=" * 80)
     print("NDS STRESS TEST (Multi-Process)".center(80))
@@ -460,12 +485,23 @@ def run_stress_test(args):
     print("Test duration:       {}s".format(test_duration))
     print("Protocol:            {}".format(args.protocol))
     print("Depth:               {} (ring buffer slots)".format(depth))
+    print("Eviction window:     {} (max alive batches)".format(eviction_window))
     if depth > 0:
-        print("Key space per worker: {} x {} = {} keys ({:.2f} MB)".format(
-            depth, batch_size, depth * batch_size,
-            depth * batch_size * block_size / MB))
+        alive_mb = min(depth, eviction_window) * batch_size * block_size / MB if eviction_window > 0 else "infinite"
+        print("Key space per worker: {} x {} = {} keys".format(
+            depth, batch_size, depth * batch_size))
+        print("Peak mem per worker: {} batches x {} blocks = {:.2f} MB".format(
+            eviction_window if eviction_window > 0 else depth,
+            batch_size,
+            alive_mb if isinstance(alive_mb, float) else float("inf")))
     else:
-        print("Key space:           infinite (memory will fill up)")
+        print("Key space:           infinite (slot=iteration)")
+        if eviction_window > 0:
+            print("Peak mem per worker: {} batches x {} blocks = {:.2f} MB".format(
+                eviction_window, batch_size,
+                eviction_window * batch_size * block_size / MB))
+        else:
+            print("Peak mem per worker: infinite (no eviction)")
     if device_list:
         print("RDMA devices:        {} (round-robin)".format(", ".join(device_list)))
     if args.core_bind_start >= 0:
@@ -513,7 +549,7 @@ def run_stress_test(args):
                       args.protocol, worker_device,
                       args.local_hostname, test_duration,
                       stats_queue, stop_event, core_id,
-                      depth),
+                      depth, eviction_window),
                 daemon=True,
             )
             p.start()
