@@ -136,16 +136,25 @@ void FilereadWorkerPool::workerThread() {
 // ============================================================================
 // MemcpyWorkerPool Implementation
 // ============================================================================
-// Since memcpy is bound by memory bandwidth, we only need one worker thread.
-constexpr int kDefaultMemcpyWorkers = 1;
-
 MemcpyWorkerPool::MemcpyWorkerPool() : shutdown_(false) {
-    VLOG(1) << "Creating MemcpyWorkerPool with " << kDefaultMemcpyWorkers
+    constexpr int kDefaultMemcpyWorkers = 4;
+    int num_workers = kDefaultMemcpyWorkers;
+    const char* env_value = std::getenv("MC_MEMCPY_WORKERS");
+    if (env_value != nullptr) {
+        int parsed = std::atoi(env_value);
+        if (parsed > 0 && parsed <= 64) {
+            num_workers = parsed;
+        } else {
+            LOG(WARNING) << "Invalid MC_MEMCPY_WORKERS value: " << env_value
+                         << ", using default " << kDefaultMemcpyWorkers;
+        }
+    }
+
+    VLOG(1) << "Creating MemcpyWorkerPool with " << num_workers
             << " workers";
 
-    // Start worker threads
-    workers_.reserve(kDefaultMemcpyWorkers);
-    for (int i = 0; i < kDefaultMemcpyWorkers; ++i) {
+    workers_.reserve(num_workers);
+    for (int i = 0; i < num_workers; ++i) {
         workers_.emplace_back(&MemcpyWorkerPool::workerThread, this);
     }
 }

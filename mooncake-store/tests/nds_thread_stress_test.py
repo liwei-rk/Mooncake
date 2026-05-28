@@ -21,6 +21,7 @@ MB = 1024**2
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 logger = logging.getLogger(__name__)
 
+
 def find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -78,11 +79,9 @@ def start_master(args):
     os.close(master_log_fd)
     master_log_file = open(master_log_path, "w", encoding="utf-8")
 
-    master_data_dir = tempfile.mkdtemp(prefix="nds_thread_stress_data-")
     cmd = [
         master_binary,
         "--use_od=true",
-        "--root_fs_dir={}".format(master_data_dir),
         "--cluster_id=nds_thread_stress",
         "--enable_http_metadata_server=true",
         "--rpc_address=127.0.0.1",
@@ -119,7 +118,7 @@ def start_master(args):
 
     print("    Master started - RPC: 127.0.0.1:{}, Metadata: {}".format(
         rpc_port, metadata_url))
-    return master_proc, master_log_file, master_log_path, rpc_port, http_port, master_data_dir
+    return master_proc, master_log_file, master_log_path, rpc_port, http_port
 
 
 def stop_master(master_proc, master_log_file, master_log_path):
@@ -141,9 +140,22 @@ def stop_master(master_proc, master_log_file, master_log_path):
     print("    Master stopped")
 
 
-def generate_batch_keys(entity_id, batch_seq, batch_size):
-    return ["t{}_b{}_k{}".format(entity_id, batch_seq, i)
+def generate_batch_keys(entity_id, slot_idx, batch_size):
+    return ["t{}_s{}_k{}".format(entity_id, slot_idx, i)
             for i in range(batch_size)]
+
+
+def _remove_slot(store, thread_idx, slot):
+    regex = "^t{}_s{}_k\\d+$".format(thread_idx, slot)
+    try:
+        removed = store.remove_by_regex(regex, force=True)
+        logger.debug("Thread {} removed {} keys from slot {}".format(
+            thread_idx, removed, slot))
+        return removed
+    except Exception as e:
+        logger.warning("Thread {} remove slot {} failed: {}".format(
+            thread_idx, slot, e))
+        return 0
 
 
 class ThreadStats:
@@ -151,6 +163,7 @@ class ThreadStats:
         self.lock = threading.Lock()
         self.start_time = time.time()
         self.bw_start_time = time.time()
+        self.peak_bw = 0.0
         self.thread_stats = {}
         for i in range(num_threads):
             self.thread_stats[i] = {
@@ -198,68 +211,159 @@ class ThreadStats:
 
     def snapshot_and_reset(self):
         with self.lock:
+            interval_bytes = sum(s["total_bytes"] for s in self.thread_stats.values())
+            interval_ops = sum(s["io_count"] for s in self.thread_stats.values())
+            interval_lat = sum(s["total_latency"] for s in self.thread_stats.values())
+            interval_errors = sum(s["error_count"] for s in self.thread_stats.values())
+
+            all_bytes = sum(s["all_total_bytes"] for s in self.thread_stats.values())
+            all_ops = sum(s["all_io_count"] for s in self.thread_stats.values())
+
             elapsed = time.time() - self.bw_start_time
-            total_bytes = sum(s["total_bytes"] for s in self.thread_stats.values())
-            total_ops = sum(s["io_count"] for s in self.thread_stats.values())
-            total_lat = sum(s["total_latency"] for s in self.thread_stats.values())
-            total_errors = sum(s["error_count"] for s in self.thread_stats.values())
-            avg_lat = total_lat / total_ops if total_ops > 0 else 0
-            bw = total_bytes / elapsed / GB if elapsed > 0 else 0
-            self.bw_start_time = time.time()
-            for s in self.thread_stats.values():
-                s["io_count"] = 0
-                s["total_bytes"] = 0
-                s["total_latency"] = 0.0
-                s["success_ops"] = 0
-                s["error_count"] = 0
-            return bw, avg_lat, total_ops, total_errors
+
+            if interval_bytes > 0:
+                interval_bw = interval_bytes / elapsed / GB if elapsed > 0 else 0
+                self.bw_start_time = time.time()
+
+                total_elapsed = time.time() - self.start_time
+                cumulative_bw = all_bytes / total_elapsed / GB if total_elapsed > 0 else 0
+
+                if interval_bw > self.peak_bw:
+                    self.peak_bw = interval_bw
+                if cumulative_bw > self.peak_bw:
+                    self.peak_bw = cumulative_bw
+
+                avg_lat = interval_lat / interval_ops if interval_ops > 0 else 0
+
+                for s in self.thread_stats.values():
+                    s["io_count"] = 0
+                    s["total_bytes"] = 0
+                    s["total_latency"] = 0.0
+                    s["success_ops"] = 0
+                    s["error_count"] = 0
+
+                return interval_bw, cumulative_bw, avg_lat, interval_ops, interval_errors
+            else:
+                return None
 
 
-def worker_thread(thread_idx, operation_mode, block_size, batch_size,
-                   store, buf_ptr, thread_offset, test_duration,
-                   thread_stats):
-    batch_seq = 0
+def worker_thread(store, thread_idx, operation_mode, block_size, batch_size,
+                   test_duration, thread_stats, core_id, depth,
+                   eviction_window, thread_buf_ptr):
+    if core_id >= 0:
+        try:
+            os.sched_setaffinity(0, {core_id})
+            logger.info("Thread {} bound to core {}".format(thread_idx, core_id))
+        except Exception as e:
+            logger.warning("Thread {} failed to bind core {}: {}".format(
+                thread_idx, core_id, e))
+
+    num_slots = depth if depth > 0 else 1
+    slot_keys = [generate_batch_keys(thread_idx, s, batch_size)
+                 for s in range(num_slots)]
+    alive_slots = {}
+    alive_order = []
+
+    if operation_mode == "batch_get" or operation_mode == "mixed":
+        warmup_keys = []
+        warmup_ptrs = []
+        warmup_sizes = []
+        for s_idx in range(num_slots):
+            keys = generate_batch_keys(thread_idx, s_idx, batch_size)
+            warmup_keys.extend(keys)
+            for k_idx, _ in enumerate(keys):
+                warmup_ptrs.append(thread_buf_ptr + k_idx * block_size)
+                warmup_sizes.append(block_size)
+        ret_codes = store.batch_put_from(warmup_keys, warmup_ptrs, warmup_sizes)
+        failed = sum(1 for rc in ret_codes if rc != 0)
+        if failed > 0:
+            logger.warning("Thread {} warmup: {} keys failed".format(thread_idx, failed))
+        else:
+            logger.info("Thread {} warmup OK".format(thread_idx))
+
+    iteration = 0
     total_batch_bytes = batch_size * block_size
-    thread_buf_ptr = buf_ptr + thread_offset
-
     deadline = time.time() + test_duration
 
-    while time.time() < deadline:
-        try:
-            batch_keys = generate_batch_keys(thread_idx, batch_seq, batch_size)
+    try:
+        while time.time() < deadline:
+            try:
+                if depth > 0:
+                    slot = iteration % depth
+                    batch_keys = slot_keys[slot]
+                else:
+                    slot = iteration
+                    batch_keys = generate_batch_keys(
+                        thread_idx, iteration, batch_size)
 
-            buffer_ptrs = []
-            sizes = []
-            for i in range(len(batch_keys)):
-                offset = i * block_size
-                buffer_ptrs.append(thread_buf_ptr + offset)
-                sizes.append(block_size)
+                buffer_ptrs = []
+                sizes = []
+                for i in range(len(batch_keys)):
+                    offset = i * block_size
+                    buffer_ptrs.append(thread_buf_ptr + offset)
+                    sizes.append(block_size)
 
-            start_time = time.time()
-            if operation_mode == "batch_put":
-                ret_codes = store.batch_put_from(batch_keys, buffer_ptrs, sizes)
-                all_success = all(rc == 0 for rc in ret_codes)
-            elif operation_mode == "batch_get":
-                ret_codes = store.batch_get_into(batch_keys, buffer_ptrs, sizes)
-                all_success = all(rc > 0 for rc in ret_codes)
-            latency = time.time() - start_time
+                if operation_mode == "batch_put":
+                    if slot in alive_slots:
+                        _remove_slot(store, thread_idx, slot)
+                        alive_order.remove(slot)
+                        del alive_slots[slot]
 
-            batch_seq += 1
+                start_time = time.time()
+                if operation_mode == "batch_put":
+                    ret_codes = store.batch_put_from(batch_keys, buffer_ptrs, sizes)
+                    all_success = all(rc == 0 for rc in ret_codes)
+                    if all_success:
+                        alive_slots[slot] = iteration
+                        alive_order.append(slot)
+                elif operation_mode == "batch_get":
+                    ret_codes = store.batch_get_into(batch_keys, buffer_ptrs, sizes)
+                    all_success = all(rc > 0 for rc in ret_codes)
+                elif operation_mode == "mixed":
+                    if thread_idx % 2 == 0:
+                        ret_codes = store.batch_put_from(batch_keys, buffer_ptrs, sizes)
+                        all_success = all(rc == 0 for rc in ret_codes)
+                        if all_success:
+                            alive_slots[slot] = iteration
+                            alive_order.append(slot)
+                    else:
+                        ret_codes = store.batch_get_into(batch_keys, buffer_ptrs, sizes)
+                        all_success = all(rc > 0 for rc in ret_codes)
+                latency = time.time() - start_time
 
-            thread_stats.add_batch_stats(thread_idx, all_success,
-                                         total_batch_bytes, latency)
+                if (operation_mode == "batch_put" or operation_mode == "mixed") and eviction_window > 0:
+                    while len(alive_slots) > eviction_window:
+                        oldest_slot = alive_order[0]
+                        _remove_slot(store, thread_idx, oldest_slot)
+                        alive_order.pop(0)
+                        del alive_slots[oldest_slot]
 
-            if not all_success:
-                failed_count = sum(1 for rc in ret_codes
-                                   if (operation_mode == "batch_put" and rc != 0)
-                                   or (operation_mode == "batch_get" and rc <= 0))
-                if failed_count > 3:
-                    logger.warning("Thread {} {}: {} keys failed".format(
-                        thread_idx, operation_mode, failed_count))
-        except Exception as e:
-            logger.error("Thread {} exception: {}".format(thread_idx, e))
-            thread_stats.add_batch_stats(thread_idx, False, 0, 0)
-            break
+                iteration += 1
+
+                thread_stats.add_batch_stats(thread_idx, all_success,
+                                             total_batch_bytes, latency)
+
+                if not all_success:
+                    failed_count = sum(1 for rc in ret_codes
+                                       if (operation_mode == "batch_put" and rc != 0)
+                                       or (operation_mode == "batch_get" and rc <= 0)
+                                       or (operation_mode == "mixed" and (
+                                           (thread_idx % 2 == 0 and rc != 0)
+                                           or (thread_idx % 2 != 0 and rc <= 0))))
+                    if failed_count > 3:
+                        logger.warning("Thread {} {}: {} keys failed".format(
+                            thread_idx, operation_mode, failed_count))
+            except Exception as e:
+                logger.error("Thread {} exception: {}".format(thread_idx, e))
+                thread_stats.add_batch_stats(thread_idx, False, 0, 0)
+                break
+    finally:
+        for slot in list(alive_slots.keys()):
+            try:
+                store.remove_by_regex(
+                    "^t{}_s{}_k\\d+$".format(thread_idx, slot), force=True)
+            except Exception:
+                pass
 
 
 def print_final_report(thread_stats, args):
@@ -272,6 +376,8 @@ def print_final_report(thread_stats, args):
     print("Batch size:          {}".format(args.batch_size))
     print("Block size:          {} ({:.2f} MB)".format(args.block_size, args.block_size / MB))
     print("Num threads:         {}".format(args.num_threads))
+    print("Depth:               {}".format(args.depth))
+    print("Eviction window:     {}".format(args.eviction_window))
     print("-" * 80)
 
     total_bytes = thread_stats.get_all_bytes()
@@ -288,12 +394,13 @@ def print_final_report(thread_stats, args):
     print("Error rate:          {:12.3f}%".format(error_rate))
     print("-" * 80)
     print("Avg bandwidth:       {:5.2f} GB/s".format(bw_gbs))
+    print("Peak bandwidth:      {:5.2f} GB/s".format(thread_stats.peak_bw))
     print("Avg latency:         {:.6f}s".format(avg_lat))
     print("=" * 80)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="NDS Thread Stress Test - Single Client, Multiple Threads")
+    parser = argparse.ArgumentParser(description="NDS Thread Stress Test")
     parser.add_argument("--operation-mode", type=str, default="batch_put",
                         choices=["batch_put", "batch_get", "mixed"],
                         help="Operation mode: batch_put, batch_get, or mixed")
@@ -302,7 +409,7 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=128,
                         help="Number of keys per batch operation")
     parser.add_argument("--num-threads", type=int, default=8,
-                        help="Number of threads sharing one Client")
+                        help="Number of worker threads")
     parser.add_argument("--duration", type=int, default=30,
                         help="Test duration in seconds")
     parser.add_argument("--monitor-interval", type=int, default=1,
@@ -316,6 +423,12 @@ def parse_args():
                         help="Local hostname (port 0 = auto-detect)")
     parser.add_argument("--global-segment-size", type=int, default=512,
                         help="Global segment size in MB")
+    parser.add_argument("--depth", type=int, default=1,
+                        help="Ring buffer depth: number of key batches to cycle through")
+    parser.add_argument("--eviction-window", type=int, default=1,
+                        help="Max number of alive batches in memory at any time")
+    parser.add_argument("--core-bind-start", type=int, default=-1,
+                        help="Start CPU core for binding (-1 to disable)")
     parser.add_argument("--master-binary", type=str, default="",
                         help="Path to mooncake_master binary (auto-detect if empty)")
     return parser.parse_args()
@@ -328,96 +441,99 @@ def run_thread_stress_test(args):
     num_threads = args.num_threads
     test_duration = args.duration
     monitor_interval = args.monitor_interval
+    depth = args.depth
+    eviction_window = args.eviction_window
 
     per_thread_buffer_size = batch_size * block_size
     total_buffer_size = per_thread_buffer_size * num_threads
 
     print("=" * 80)
-    print("NDS THREAD STRESS TEST (Single Process, Single Client)".center(80))
+    print("NDS THREAD STRESS TEST".center(80))
     print("=" * 80)
     print("Operation mode:      {}".format(operation_mode))
     print("Batch size:          {}".format(batch_size))
     print("Block size:          {} ({:.2f} MB)".format(block_size, block_size / MB))
     print("Num threads:         {}".format(num_threads))
-    print("Per-thread buffer:   {} ({:.2f} MB)".format(per_thread_buffer_size, per_thread_buffer_size / MB))
     print("Total buffer:        {} ({:.2f} MB)".format(total_buffer_size, total_buffer_size / MB))
     print("Test duration:       {}s".format(test_duration))
     print("Protocol:            {}".format(args.protocol))
+    print("Depth:               {} (ring buffer slots)".format(depth))
+    print("Eviction window:     {} (max alive batches)".format(eviction_window))
+    if args.core_bind_start >= 0:
+        print("Core binding:        from core {} (sequential)".format(args.core_bind_start))
     print("=" * 80)
 
     master_proc = None
     master_log_file = None
     master_log_path = None
-    master_data_dir = None
-
-    thread_stats = ThreadStats(num_threads)
+    mm = None
+    store = None
 
     try:
-        master_proc, master_log_file, master_log_path, rpc_port, http_port, master_data_dir = start_master(args)
+        master_proc, master_log_file, master_log_path, rpc_port, http_port = start_master(args)
         metadata_url = "http://127.0.0.1:{}/metadata".format(http_port)
         master_addr = "127.0.0.1:{}".format(rpc_port)
 
         global_segment_size = args.global_segment_size * MB
 
-        print(">>> Phase I: Setup single Client with NDS init memory = shared buffer")
+        print(">>> Phase I: Allocate buffer and initialize store")
         mooncake.store.init_glog()
         mooncake.store.set_vlog_level(0)
         mooncake.store.set_log_to_stderr(True)
 
         mm = mmap.mmap(-1, total_buffer_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
         buf = np.frombuffer(mm, dtype=np.uint8, count=total_buffer_size)
-        buf_ptr = buf.ctypes.data
+        base_buf_ptr = buf.ctypes.data
 
         pattern = (np.arange(block_size, dtype=np.uint32) % 251).astype(np.uint8)
         for t in range(num_threads):
             offset = t * per_thread_buffer_size
             buf[offset:offset + per_thread_buffer_size] = np.tile(pattern, batch_size)
 
-        local_hostname = args.local_hostname
-        if local_hostname.endswith(":0"):
-            local_hostname = local_hostname[:-2] + ":{}".format(find_free_port())
-
         store = MooncakeDistributedStore()
         retcode = store.setup(
-            local_hostname=local_hostname,
+            local_hostname=args.local_hostname,
             metadata_server=metadata_url,
             global_segment_size=global_segment_size,
             local_buffer_size=total_buffer_size,
             protocol=args.protocol,
             rdma_devices=args.device_name,
             master_server_addr=master_addr,
-            nds_mem_addr=buf_ptr,
-            nds_mem_size=total_buffer_size,
         )
         if retcode:
-            print("ERROR: Client setup failed, retcode={}".format(retcode))
+            print("ERROR: Store setup failed, retcode={}".format(retcode))
             mm.close()
+            mm = None
             return
 
-        print("    Client setup OK (NDS init memory = buffer at 0x{:x}, size={})".format(
-            buf_ptr, total_buffer_size))
-
-        retcode = store.register_buffer(buf_ptr, total_buffer_size)
+        retcode = store.register_buffer(base_buf_ptr, total_buffer_size)
         if retcode:
             print("ERROR: register_buffer failed, retcode={}".format(retcode))
             mm.close()
+            mm = None
             return
 
-        print("    register_buffer OK")
+        print("    Store initialized OK, buffer at 0x{:x}, size={}".format(
+            base_buf_ptr, total_buffer_size))
 
-        print(">>> Phase II: Spawn {} threads sharing one Client".format(num_threads))
+        thread_stats = ThreadStats(num_threads)
+
+        print(">>> Phase II: Spawn {} threads (shared store)".format(num_threads))
         threads = []
         for i in range(num_threads):
             thread_mode = operation_mode
             if operation_mode == "mixed":
                 thread_mode = "batch_put" if i % 2 == 0 else "batch_get"
 
+            core_id = args.core_bind_start + i if args.core_bind_start >= 0 else -1
             thread_offset = i * per_thread_buffer_size
+            thread_buf_ptr = base_buf_ptr + thread_offset
+
             t = threading.Thread(
                 target=worker_thread,
-                args=(i, thread_mode, block_size, batch_size,
-                      store, buf_ptr, thread_offset, test_duration,
-                      thread_stats),
+                args=(store, i, thread_mode, block_size, batch_size,
+                      test_duration, thread_stats, core_id,
+                      depth, eviction_window, thread_buf_ptr),
                 daemon=True,
             )
             t.start()
@@ -428,13 +544,17 @@ def run_thread_stress_test(args):
         while time.time() - start_time < test_duration:
             time.sleep(monitor_interval)
 
+            result = thread_stats.snapshot_and_reset()
+            if result is None:
+                continue
+
             elapsed = time.time() - thread_stats.start_time
-            bw, avg_lat, total_ops, total_errors = thread_stats.snapshot_and_reset()
+            int_bw, cum_bw, avg_lat, total_ops, total_errors = result
             error_rate = total_errors / total_ops * 100 if total_ops > 0 else 0
 
-            print("[Monitor] {:6.1f}s - BW: {:5.2f} GB/s, AvgLat: {:.6f}s, "
-                  "Errors: {:3d}, ErrorRate: {:.1f}%".format(
-                      elapsed, bw, avg_lat, total_errors, error_rate))
+            print("[Monitor] {:6.1f}s - IntBW: {:5.2f} GB/s, CumBW: {:5.2f} GB/s, "
+                  "AvgLat: {:.6f}s, Errors: {:3d}, ErrRate: {:.1f}%".format(
+                      elapsed, int_bw, cum_bw, avg_lat, total_errors, error_rate))
 
             alive = sum(1 for t in threads if t.is_alive())
             if alive == 0:
@@ -442,14 +562,10 @@ def run_thread_stress_test(args):
                 break
 
         print("    Test duration reached, waiting for threads to finish...")
+        join_deadline = time.time() + 3
         for t in threads:
-            t.join(timeout=2)
-
-        try:
-            store.unregister_buffer(buf_ptr)
-        except Exception:
-            pass
-        mm.close()
+            remaining = max(0, join_deadline - time.time())
+            t.join(timeout=remaining)
 
         print_final_report(thread_stats, args)
 
@@ -457,9 +573,17 @@ def run_thread_stress_test(args):
         print("ERROR: {}".format(e))
     finally:
         print(">>> Cleanup")
+        if store:
+            try:
+                store.unregister_buffer(base_buf_ptr)
+            except Exception:
+                pass
+        if mm:
+            try:
+                mm.close()
+            except Exception:
+                pass
         stop_master(master_proc, master_log_file, master_log_path)
-        if master_data_dir and os.path.exists(master_data_dir):
-            shutil.rmtree(master_data_dir, ignore_errors=True)
         gc.collect()
         print(">>> Test complete")
 

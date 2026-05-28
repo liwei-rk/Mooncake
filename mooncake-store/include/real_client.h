@@ -75,9 +75,7 @@ class RealClient : public PyClient {
         const std::string &rdma_devices = "",
         const std::string &master_server_addr = "127.0.0.1:50051",
         const std::shared_ptr<TransferEngine> &transfer_engine = nullptr,
-        const std::string &ipc_socket_path = "",
-        void *nds_mem_addr = nullptr,
-        uint64_t nds_mem_size = 0);
+        const std::string &ipc_socket_path = "");
 
     int setup_dummy(size_t mem_pool_size, size_t local_buffer_size,
                     const std::string &server_address,
@@ -386,9 +384,7 @@ class RealClient : public PyClient {
         const std::string &master_server_addr = "127.0.0.1:50051",
         const std::shared_ptr<TransferEngine> &transfer_engine = nullptr,
         const std::string &ipc_socket_path = "", int local_rpc_port = 50052,
-        bool enable_offload = false,
-        void *nds_mem_addr = nullptr,
-        uint64_t nds_mem_size = 0);
+        bool enable_offload = false);
 
     // Overload that accepts a configuration dictionary
     tl::expected<void, ErrorCode> setup_internal(const ConfigDict &config);

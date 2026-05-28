@@ -199,8 +199,7 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
     const std::string &master_server_addr,
     const std::shared_ptr<TransferEngine> &transfer_engine,
     const std::string &ipc_socket_path, int local_rpc_port,
-    bool enable_offload,
-    void *nds_mem_addr, uint64_t nds_mem_size) {
+    bool enable_offload) {
     this->protocol = protocol;
     this->ipc_socket_path_ = ipc_socket_path;
     const bool should_use_hugepage = use_hugepage_ &&
@@ -229,8 +228,7 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
             hostname.substr(0, colon_pos + 1) + std::to_string(local_rpc_port);
         auto client_opt = mooncake::Client::Create(
             this->local_hostname, metadata_server, protocol, device_name,
-            master_server_addr, transfer_engine, {},
-            nds_mem_addr, nds_mem_size);
+            master_server_addr, transfer_engine, {});
         if (!client_opt) {
             LOG(ERROR) << "Failed to create client";
             return tl::unexpected(ErrorCode::INVALID_PARAMS);
@@ -259,8 +257,7 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
                 hostname + ":" + std::to_string(local_rpc_port);
             auto client_opt = mooncake::Client::Create(
                 this->local_hostname, metadata_server, protocol, device_name,
-                master_server_addr, transfer_engine, {},
-                nds_mem_addr, nds_mem_size);
+                master_server_addr, transfer_engine, {});
             if (client_opt) {
                 client_ = *client_opt;
                 success = true;
@@ -450,13 +447,12 @@ int RealClient::setup_real(
     const std::string &protocol, const std::string &rdma_devices,
     const std::string &master_server_addr,
     const std::shared_ptr<TransferEngine> &transfer_engine,
-    const std::string &ipc_socket_path,
-    void *nds_mem_addr, uint64_t nds_mem_size) {
+    const std::string &ipc_socket_path) {
     return to_py_ret(setup_internal(local_hostname, metadata_server,
                                     global_segment_size, local_buffer_size,
                                     protocol, rdma_devices, master_server_addr,
                                     transfer_engine, ipc_socket_path, 50052,
-                                    false, nds_mem_addr, nds_mem_size));
+                                    false));
 }
 
 namespace {
@@ -550,7 +546,7 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
     return setup_internal(local_hostname, metadata_server, global_segment_size,
                           local_buffer_size, protocol, rdma_devices,
                           master_server_addr, nullptr, ipc_socket_path,
-                          50052, false, nullptr, 0);
+                          50052, false);
 }
 
 tl::expected<void, ErrorCode> RealClient::initAll_internal(

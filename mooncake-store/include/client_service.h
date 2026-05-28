@@ -82,9 +82,7 @@ class Client {
         const std::optional<std::string>& device_names = std::nullopt,
         const std::string& master_server_entry = kDefaultMasterAddress,
         const std::shared_ptr<TransferEngine>& transfer_engine = nullptr,
-        std::map<std::string, std::string> labels = {},
-        void* nds_mem_addr = nullptr,
-        uint64_t nds_mem_size = 0);
+        std::map<std::string, std::string> labels = {});
 
     /**
      * @brief Retrieves data for a given key
@@ -514,11 +512,9 @@ class Client {
      * @brief Prepare and use the storage backend for persisting data
      */
 void PrepareStorageBackend(const std::string& storage_root_dir,
-                                 const std::string& fsdir,
-                                 bool enable_eviction = true,
-                                 uint64_t quota_bytes = 0,
-                                  void* nds_mem_addr = nullptr,
-                                  uint64_t nds_mem_size = 0);
+                                  const std::string& fsdir,
+                                  bool enable_eviction = true,
+                                  uint64_t quota_bytes = 0);
 
     /**
      * @brief Asynchronously store a single object to local file via

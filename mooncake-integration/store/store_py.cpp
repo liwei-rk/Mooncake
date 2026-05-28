@@ -1262,9 +1262,7 @@ PYBIND11_MODULE(store, m) {
                const std::string &protocol = "tcp",
                const std::string &rdma_devices = "",
                const std::string &master_server_addr = "127.0.0.1:50051",
-               const py::object &engine = py::none(),
-               uintptr_t nds_mem_addr = 0,
-               uint64_t nds_mem_size = 0) {
+               const py::object &engine = py::none()) {
                 auto real_client = self.init_real_client();
                 std::shared_ptr<mooncake::TransferEngine> transfer_engine =
                     nullptr;
@@ -1272,21 +1270,15 @@ PYBIND11_MODULE(store, m) {
                     transfer_engine =
                         engine.cast<std::shared_ptr<TransferEngine>>();
                 }
-                void *nds_addr = (nds_mem_addr != 0)
-                                     ? reinterpret_cast<void *>(nds_mem_addr)
-                                     : nullptr;
                 return real_client->setup_real(
                     local_hostname, metadata_server, global_segment_size,
                     local_buffer_size, protocol, rdma_devices,
-                    master_server_addr, transfer_engine, "",
-                    nds_addr, nds_mem_size);
+                    master_server_addr, transfer_engine, "");
             },
             py::arg("local_hostname"), py::arg("metadata_server"),
             py::arg("global_segment_size"), py::arg("local_buffer_size"),
             py::arg("protocol"), py::arg("rdma_devices"),
-            py::arg("master_server_addr"), py::arg("engine") = py::none(),
-            py::arg("nds_mem_addr") = 0,
-            py::arg("nds_mem_size") = 0)
+            py::arg("master_server_addr"), py::arg("engine") = py::none())
         .def(
             "setup",
             [](MooncakeStorePyWrapper &self, const py::dict &config_dict) {

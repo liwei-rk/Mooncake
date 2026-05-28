@@ -1,8 +1,10 @@
 #include "kv_storage_backend.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <dlfcn.h>
+#include <unordered_map>
 
 namespace mooncake {
 
@@ -75,17 +77,7 @@ struct NDSLoader {
 }  // namespace
 
 KVStorageBackend::~KVStorageBackend() {
-    if (nds_mem_addr_ && owns_nds_memory_) {
-        LOG(INFO) << "Cleaning up KV storage backend memory";
-        free(nds_mem_addr_);
-        nds_mem_addr_ = nullptr;
-        nds_mem_size_ = 0;
-        owns_nds_memory_ = false;
-        auto& loader = NDSLoader::Instance();
-        loader.nds_initialized = false;
-        loader.nds_mem_addr = nullptr;
-        loader.nds_mem_size = 0;
-    }
+    CleanupNDS();
 }
 
 tl::expected<void, ErrorCode> KVStorageBackend::Init(void* nds_mem_addr,
@@ -158,6 +150,21 @@ tl::expected<void, ErrorCode> KVStorageBackend::Init(void* nds_mem_addr,
     return {};
 }
 
+void KVStorageBackend::CleanupNDS() {
+    if (nds_mem_addr_ && owns_nds_memory_) {
+        LOG(INFO) << "Cleaning up KV storage backend memory";
+        free(nds_mem_addr_);
+    }
+    nds_mem_addr_ = nullptr;
+    nds_mem_size_ = 0;
+    owns_nds_memory_ = false;
+    auto& loader = NDSLoader::Instance();
+    loader.nds_initialized = false;
+    loader.nds_mem_addr = nullptr;
+    loader.nds_mem_size = 0;
+    initialized_.store(false, std::memory_order_release);
+}
+
 tl::expected<std::vector<std::string>, ErrorCode> KVStorageBackend::StoreObjects(
     const std::vector<std::string>& keys,
     const std::vector<std::vector<Slice>>& batched_slices) {
@@ -167,18 +174,44 @@ tl::expected<std::vector<std::string>, ErrorCode> KVStorageBackend::StoreObjects
     std::vector<size_t> nds_offsets;
     std::vector<size_t> nds_lengths;
 
+    // Each key's slices come from a single contiguous client buffer (split by
+    // kMaxSliceSize in batch_put_from_internal). NDS requires contiguous data
+    // for zero-copy writes: if slices are contiguous in memory, we merge them
+    // into a single NDS entry covering the entire object; if not contiguous,
+    // this violates the expected invariant and we fail immediately.
     for (size_t i = 0; i < keys.size(); ++i) {
         const auto& slices = batched_slices[i];
         uint64_t blockId = objectKeyToUint64(keys[i]);
-        size_t slice_offset = 0;
-        for (const auto& slice : slices) {
-            blockIds.push_back(blockId);
-            blockAddrs.push_back(reinterpret_cast<uint8_t*>(slice.ptr));
-            nds_offsets.push_back(slice_offset);
-            nds_lengths.push_back(slice.size);
-            slice_offset += slice.size;
+        size_t total_slice_size = 0;
+        for (const auto& sl : slices) total_slice_size += sl.size;
+
+        bool contiguous = true;
+        for (size_t s = 1; s < slices.size(); ++s) {
+            if (reinterpret_cast<uint8_t*>(slices[s - 1].ptr) + slices[s - 1].size !=
+                reinterpret_cast<uint8_t*>(slices[s].ptr)) {
+                contiguous = false;
+                break;
+            }
         }
+
+        if (!contiguous) {
+            LOG(ERROR) << "NDS StoreObjects: key=" << keys[i]
+                       << " slices are not contiguous in memory, "
+                       << "cannot perform zero-copy NDS write.";
+            for (size_t s = 0; s < slices.size(); ++s) {
+                LOG(ERROR) << "  slice[" << s << "]:"
+                           << " ptr=" << slices[s].ptr
+                           << " size=" << slices[s].size;
+            }
+            return tl::unexpected(ErrorCode::INVALID_PARAMS);
+        }
+
+        blockIds.push_back(blockId);
+        blockAddrs.push_back(reinterpret_cast<uint8_t*>(slices[0].ptr));
+        nds_offsets.push_back(0);
+        nds_lengths.push_back(total_slice_size);
     }
+
     auto t_flatten_end = std::chrono::steady_clock::now();
     LOG(INFO) << "[BatchPut] KVStoreObjects flatten slices: "
               << std::chrono::duration_cast<std::chrono::microseconds>(
@@ -209,17 +242,42 @@ tl::expected<void, ErrorCode> KVStorageBackend::LoadObjects(
     std::vector<size_t> nds_offsets;
     std::vector<size_t> nds_lengths;
 
+    // Each key's slices come from a single contiguous client buffer (split by
+    // kMaxSliceSize in batch_get_from_internal). NDS requires contiguous data
+    // for zero-copy reads: if slices are contiguous in memory, we merge them
+    // into a single NDS entry covering the entire object; if not contiguous,
+    // this violates the expected invariant and we fail immediately.
     for (size_t i = 0; i < keys.size(); ++i) {
         const auto& slices = batched_slices[i];
         uint64_t blockId = objectKeyToUint64(keys[i]);
-        size_t slice_offset = 0;
-        for (const auto& slice : slices) {
-            blockIds.push_back(blockId);
-            blockAddrs.push_back(reinterpret_cast<uint8_t*>(slice.ptr));
-            nds_offsets.push_back(slice_offset);
-            nds_lengths.push_back(slice.size);
-            slice_offset += slice.size;
+        size_t total_slice_size = 0;
+        for (const auto& sl : slices) total_slice_size += sl.size;
+
+        bool contiguous = true;
+        for (size_t s = 1; s < slices.size(); ++s) {
+            if (reinterpret_cast<uint8_t*>(slices[s - 1].ptr) + slices[s - 1].size !=
+                reinterpret_cast<uint8_t*>(slices[s].ptr)) {
+                contiguous = false;
+                break;
+            }
         }
+
+        if (!contiguous) {
+            LOG(ERROR) << "NDS LoadObjects: key=" << keys[i]
+                       << " slices are not contiguous in memory, "
+                       << "cannot perform zero-copy NDS read.";
+            for (size_t s = 0; s < slices.size(); ++s) {
+                LOG(ERROR) << "  slice[" << s << "]:"
+                           << " ptr=" << slices[s].ptr
+                           << " size=" << slices[s].size;
+            }
+            return tl::unexpected(ErrorCode::INVALID_PARAMS);
+        }
+
+        blockIds.push_back(blockId);
+        blockAddrs.push_back(reinterpret_cast<uint8_t*>(slices[0].ptr));
+        nds_offsets.push_back(0);
+        nds_lengths.push_back(total_slice_size);
     }
 
     auto& loader = NDSLoader::Instance();

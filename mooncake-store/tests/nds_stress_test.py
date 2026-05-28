@@ -85,11 +85,9 @@ def start_master(args):
     os.close(master_log_fd)
     master_log_file = open(master_log_path, "w", encoding="utf-8")
 
-    master_data_dir = tempfile.mkdtemp(prefix="nds_stress_data-")
     cmd = [
         master_binary,
         "--use_od=true",
-        "--root_fs_dir={}".format(master_data_dir),
         "--cluster_id=nds_stress",
         "--enable_http_metadata_server=true",
         "--rpc_address=127.0.0.1",
@@ -126,7 +124,7 @@ def start_master(args):
 
     print("    Master started - RPC: 127.0.0.1:{}, Metadata: {}".format(
         rpc_port, metadata_url))
-    return master_proc, master_log_file, master_log_path, rpc_port, http_port, master_data_dir
+    return master_proc, master_log_file, master_log_path, rpc_port, http_port
 
 
 def stop_master(master_proc, master_log_file, master_log_path):
@@ -205,8 +203,6 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
         protocol=protocol,
         rdma_devices=device_name,
         master_server_addr=master_addr,
-        nds_mem_addr=buf_ptr,
-        nds_mem_size=buffer_size,
     )
     if retcode:
         stats_queue.put((MSG_SETUP_FAIL, worker_idx, retcode))
@@ -351,22 +347,33 @@ class GlobalStats:
         return total_lat / total_ops
 
     def snapshot_and_reset(self):
-        elapsed = time.time() - self.bw_start_time
+        # Accumulate time across intervals with zero data to avoid
+        # burst-driven bandwidth spikes. When no bytes were transferred
+        # in this interval, keep the time window growing instead of
+        # reporting 0 bandwidth. When bytes arrive, divide by the full
+        # accumulated wall-clock span for a stable measurement.
         total_bytes = sum(s["total_bytes"] for s in self.worker_stats.values())
         total_ops = sum(s["io_count"] for s in self.worker_stats.values())
         total_lat = sum(s["total_latency"] for s in self.worker_stats.values())
         total_errors = sum(s["error_count"] for s in self.worker_stats.values())
         avg_lat = total_lat / total_ops if total_ops > 0 else 0
-        bw = total_bytes / elapsed / GB if elapsed > 0 else 0
-        if bw > self.peak_bw:
-            self.peak_bw = bw
-        self.bw_start_time = time.time()
-        for s in self.worker_stats.values():
-            s["io_count"] = 0
-            s["total_bytes"] = 0
-            s["total_latency"] = 0.0
-            s["success_ops"] = 0
-            s["error_count"] = 0
+
+        elapsed = time.time() - self.bw_start_time
+
+        if total_bytes > 0:
+            bw = total_bytes / elapsed / GB if elapsed > 0 else 0
+            if bw > self.peak_bw:
+                self.peak_bw = bw
+            self.bw_start_time = time.time()
+            for s in self.worker_stats.values():
+                s["io_count"] = 0
+                s["total_bytes"] = 0
+                s["total_latency"] = 0.0
+                s["success_ops"] = 0
+                s["error_count"] = 0
+        else:
+            bw = 0.0
+
         return bw, avg_lat, total_ops, total_errors
 
     def drain_queue(self, stats_queue):
@@ -511,7 +518,6 @@ def run_stress_test(args):
     master_proc = None
     master_log_file = None
     master_log_path = None
-    master_data_dir = None
 
     stop_event = multiprocessing.Event()
     stats_queue = multiprocessing.Queue()
@@ -519,7 +525,7 @@ def run_stress_test(args):
     global_stats = GlobalStats(num_workers)
 
     try:
-        master_proc, master_log_file, master_log_path, rpc_port, http_port, master_data_dir = start_master(args)
+        master_proc, master_log_file, master_log_path, rpc_port, http_port = start_master(args)
         metadata_url = "http://127.0.0.1:{}/metadata".format(http_port)
         master_addr = "127.0.0.1:{}".format(rpc_port)
 
@@ -622,8 +628,6 @@ def run_stress_test(args):
                 p.terminate()
                 p.join(timeout=2)
         stop_master(master_proc, master_log_file, master_log_path)
-        if master_data_dir and os.path.exists(master_data_dir):
-            shutil.rmtree(master_data_dir, ignore_errors=True)
         gc.collect()
         print(">>> Test complete")
 

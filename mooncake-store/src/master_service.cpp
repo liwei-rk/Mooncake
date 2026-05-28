@@ -136,6 +136,9 @@ MasterService::MasterService(const MasterServiceConfig& config)
         MasterMetricManager::instance().inc_total_file_capacity(
             global_file_segment_size_);
     }
+    if (use_od_) {
+        use_disk_replica_ = true;
+    }
 
     if (enable_snapshot_) {
         if (memory_allocator_type_ == BufferAllocatorType::OFFSET) {
@@ -749,11 +752,15 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
 
     // If disk replica is enabled, allocate a disk replica
     if (use_disk_replica_) {
-        // Allocate a file path for the disk replica
-        std::string file_path =
-            ResolvePathFromKey(key, root_fs_dir_, cluster_id_);
-        replicas.emplace_back(file_path, total_length,
-                              ReplicaStatus::PROCESSING);
+        if (!root_fs_dir_.empty()) {
+            std::string file_path =
+                ResolvePathFromKey(key, root_fs_dir_, cluster_id_);
+            replicas.emplace_back(file_path, total_length,
+                                  ReplicaStatus::PROCESSING);
+        } else {
+            replicas.emplace_back("", total_length,
+                                  ReplicaStatus::PROCESSING);
+        }
     }
 
     std::vector<Replica::Descriptor> replica_list;

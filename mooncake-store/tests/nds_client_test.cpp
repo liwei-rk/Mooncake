@@ -78,8 +78,7 @@ class NdsClientTest : public ::testing::Test {
 
         auto client_opt = Client::Create(
             "localhost:17820", "P2PHANDSHAKE", FLAGS_protocol,
-            std::nullopt, master_address_, nullptr, {},
-            buffer_allocator_->getBase(), 256 * 1024 * 1024);
+            std::nullopt, master_address_, nullptr, {});
         ASSERT_TRUE(client_opt.has_value())
             << "Failed to create client: localhost:17820";
         client_ = client_opt.value();

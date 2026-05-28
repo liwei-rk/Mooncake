@@ -22,6 +22,12 @@ class KVStorageBackend {
     tl::expected<void, ErrorCode> Init(void* nds_mem_addr = nullptr,
                                        uint64_t nds_mem_size = 0);
 
+    void CleanupNDS();
+
+    bool isInitialized() const {
+        return initialized_.load(std::memory_order_acquire);
+    }
+
     tl::expected<std::vector<std::string>, ErrorCode> StoreObjects(
         const std::vector<std::string>& keys,
         const std::vector<std::vector<Slice>>& batched_slices);
