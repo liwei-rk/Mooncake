@@ -521,31 +521,16 @@ void PrepareStorageBackend(const std::string& storage_root_dir,
                                   uint64_t nds_mem_size = 0);
 
     /**
-     * @brief Batch-store objects to local disk.
-     * Handles StorageBackend::StoreObject call, and batch
-     * master RPCs (PutEnd/PutRevoke/EvictDiskReplica). Call is synchronous.
-     * @param keys Object keys to store
-     * @param batched_slices Data slices for each key
-     * @param disk_descriptors Disk descriptors for each key
-     * @return Per-key results: nullopt = success, ErrorCode = failure
+     * @brief Asynchronously store a single object to local file via
+     * StorageBackend. Enqueues StoreObject + PutEnd/EvictDiskReplica on
+     * write_thread_pool_. Used for non-NDS disk replicas.
+     * @param key Object key
+     * @param slices Data slices for the key
+     * @param disk_descriptor Disk descriptor for the key
      */
-    std::vector<std::optional<ErrorCode>> PutBatchToLocalFile(
-        const std::vector<std::string>& keys,
-        const std::vector<std::vector<Slice>>& batched_slices,
-        const std::vector<DiskDescriptor>& disk_descriptors);
-
-    /**
-     * @brief Batch-load objects from local disk.
-     * Handles StorageBackend::LoadObject call. Call is synchronous.
-     * @param keys Object keys to load
-     * @param batched_slices Data slices for each key (output buffers)
-     * @param disk_descriptors Disk descriptors for each key
-     * @return Per-key results: nullopt = success, ErrorCode = failure
-     */
-    std::vector<std::optional<ErrorCode>> GetBatchFromLocalFile(
-        const std::vector<std::string>& keys,
-        const std::vector<std::vector<Slice>>& batched_slices,
-        const std::vector<DiskDescriptor>& disk_descriptors);
+    void PutToLocalFile(const std::string& key,
+                        const std::vector<Slice>& slices,
+                        const DiskDescriptor& disk_descriptor);
 
     /**
      * @brief Initialize local hot cache
@@ -594,15 +579,12 @@ void PrepareStorageBackend(const std::string& storage_root_dir,
      * @brief Find a complete replica from a replica list
      * @param replica_list List of replicas to search through
      * @param replica the found complete replica (file or memory)
-     * @param prefer_disk When true, prefer disk replica over memory replica.
-     *                    Searches for COMPLETE disk replicas first, then falls
-     *                    back to any COMPLETE replica.
      * @return ErrorCode::OK if found, ErrorCode::INVALID_REPLICA if no complete
      * replica
      */
     ErrorCode FindFirstCompleteReplica(
         const std::vector<Replica::Descriptor>& replica_list,
-        Replica::Descriptor& replica, bool prefer_disk = false);
+        Replica::Descriptor& replica);
 
     /**
      * @brief Batch put helper methods for structured approach
@@ -645,7 +627,6 @@ void PrepareStorageBackend(const std::string& storage_root_dir,
     const std::string metadata_connstring_;
     const std::string protocol_;
 
-    // Client persistent thread pool for async operations
     ThreadPool write_thread_pool_;
     std::shared_ptr<StorageBackend> storage_backend_;
     std::shared_ptr<KVStorageBackend> kv_storage_backend_;

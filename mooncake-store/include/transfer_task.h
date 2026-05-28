@@ -17,6 +17,7 @@
 #include "types.h"
 #include "replica.h"
 #include "storage_backend.h"
+#include "kv_storage_backend.h"
 #include "client_metric.h"
 
 namespace mooncake {
@@ -309,9 +310,15 @@ class MemcpyWorkerPool {
 
 /**
  * @brief Fileread task for async execution
+ *
+ * Supports two modes:
+ * - Regular file read: uses file_path + object_size with StorageBackend::LoadObject
+ * - NDS read: uses nds_key + slices with KVStorageBackend::LoadObjects
  */
 struct FilereadTask {
+    bool use_nds;
     std::string file_path;
+    std::string nds_key;
     size_t object_size;
     std::vector<Slice> slices;
     std::shared_ptr<FilereadOperationState> state;
@@ -319,8 +326,20 @@ struct FilereadTask {
     FilereadTask(const std::string& path, size_t size,
                  const std::vector<Slice>& slices_ref,
                  std::shared_ptr<FilereadOperationState> s)
-        : file_path(path),
+        : use_nds(false),
+          file_path(path),
+          nds_key(),
           object_size(size),
+          slices(slices_ref),
+          state(std::move(s)) {}
+
+    FilereadTask(bool is_nds, const std::string& key,
+                 const std::vector<Slice>& slices_ref,
+                 std::shared_ptr<FilereadOperationState> s)
+        : use_nds(is_nds),
+          file_path(),
+          nds_key(key),
+          object_size(0),
           slices(slices_ref),
           state(std::move(s)) {}
 };
@@ -333,7 +352,8 @@ struct FilereadTask {
  */
 class FilereadWorkerPool {
    public:
-    explicit FilereadWorkerPool(std::shared_ptr<StorageBackend>& backend);
+    explicit FilereadWorkerPool(std::shared_ptr<StorageBackend>& backend,
+                                std::shared_ptr<KVStorageBackend>& kv_backend);
     ~FilereadWorkerPool();
 
     // Non-copyable, non-movable
@@ -343,8 +363,8 @@ class FilereadWorkerPool {
     FilereadWorkerPool& operator=(FilereadWorkerPool&&) = delete;
 
     /**
-     * @brief Submit a memcpy task for async execution
-     * @param task The memcpy task to execute
+     * @brief Submit a fileread task for async execution
+     * @param task The fileread task to execute
      */
     void submitTask(FilereadTask task);
 
@@ -357,6 +377,7 @@ class FilereadWorkerPool {
     std::condition_variable queue_cv_;
     std::atomic<bool> shutdown_;
     std::shared_ptr<StorageBackend> backend_;
+    std::shared_ptr<KVStorageBackend> kv_backend_;
 };
 
 /**
@@ -370,6 +391,8 @@ class TransferSubmitter {
    public:
     explicit TransferSubmitter(TransferEngine& engine,
                                std::shared_ptr<StorageBackend>& backend,
+                               std::shared_ptr<KVStorageBackend>& kv_backend,
+                               bool use_od,
                                TransferMetric* transfer_metric = nullptr);
 
     /**
@@ -405,6 +428,7 @@ class TransferSubmitter {
     std::unique_ptr<MemcpyWorkerPool> memcpy_pool_;
     std::unique_ptr<FilereadWorkerPool> fileread_pool_;
     bool memcpy_enabled_;
+    bool use_od_;
     TransferMetric* transfer_metric_;
 
     /**

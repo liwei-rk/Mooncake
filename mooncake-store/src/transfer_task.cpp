@@ -16,7 +16,8 @@ namespace mooncake {
 // threads.
 constexpr int kDefaultFilereadWorkers = 10;
 
-FilereadWorkerPool::FilereadWorkerPool(std::shared_ptr<StorageBackend>& backend)
+FilereadWorkerPool::FilereadWorkerPool(std::shared_ptr<StorageBackend>& backend,
+                                       std::shared_ptr<KVStorageBackend>& kv_backend)
     : shutdown_(false) {
     VLOG(1) << "Creating FilereadWorkerPool with " << kDefaultFilereadWorkers
             << " workers";
@@ -27,6 +28,7 @@ FilereadWorkerPool::FilereadWorkerPool(std::shared_ptr<StorageBackend>& backend)
         workers_.emplace_back(&FilereadWorkerPool::workerThread, this);
     }
     backend_ = backend;
+    kv_backend_ = kv_backend;
 }
 
 FilereadWorkerPool::~FilereadWorkerPool() {
@@ -65,9 +67,8 @@ void FilereadWorkerPool::workerThread() {
     VLOG(2) << "FilereadWorkerPool worker thread started";
 
     while (true) {
-        FilereadTask task("", 0, {}, nullptr);
+        FilereadTask task(false, "", {}, nullptr);
 
-        // Wait for task or shutdown signal
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
             queue_cv_.wait(lock, [this] {
@@ -84,27 +85,43 @@ void FilereadWorkerPool::workerThread() {
             }
         }
 
-        // Execute the task if we have one
         if (task.state) {
             try {
-                if (!backend_) {
-                    LOG(ERROR)
-                        << "Backend is not initialized, cannot load object";
-                    task.state->set_completed(ErrorCode::TRANSFER_FAIL);
-                    continue;
-                }
-
-                auto load_result = backend_->LoadObject(
-                    task.file_path, task.slices, task.object_size);
-                if (load_result) {
-                    VLOG(2) << "Fileread task completed successfully with "
-                            << task.file_path;
-                    task.state->set_completed(ErrorCode::OK);
+                if (task.use_nds) {
+                    if (!kv_backend_) {
+                        LOG(ERROR) << "KV backend not initialized, cannot load NDS object";
+                        task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                        continue;
+                    }
+                    auto load_result = kv_backend_->LoadObjects(
+                        {task.nds_key}, {task.slices});
+                    if (load_result) {
+                        VLOG(2) << "NDS fileread task completed successfully for key "
+                                << task.nds_key;
+                        task.state->set_completed(ErrorCode::OK);
+                    } else {
+                        LOG(ERROR) << "NDS fileread task failed for key: "
+                                   << task.nds_key
+                                   << " with error: " << toString(load_result.error());
+                        task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                    }
                 } else {
-                    LOG(ERROR)
-                        << "Fileread task failed for file: " << task.file_path
-                        << " with error: " << toString(load_result.error());
-                    task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                    if (!backend_) {
+                        LOG(ERROR) << "Backend is not initialized, cannot load object";
+                        task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                        continue;
+                    }
+                    auto load_result = backend_->LoadObject(
+                        task.file_path, task.slices, task.object_size);
+                    if (load_result) {
+                        VLOG(2) << "Fileread task completed successfully with "
+                                << task.file_path;
+                        task.state->set_completed(ErrorCode::OK);
+                    } else {
+                        LOG(ERROR) << "Fileread task failed for file: " << task.file_path
+                                   << " with error: " << toString(load_result.error());
+                        task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                    }
                 }
             } catch (const std::exception& e) {
                 LOG(ERROR) << "Exception during async fileread: " << e.what();
@@ -404,10 +421,13 @@ TransferStrategy TransferFuture::strategy() const {
 
 TransferSubmitter::TransferSubmitter(TransferEngine& engine,
                                      std::shared_ptr<StorageBackend>& backend,
+                                     std::shared_ptr<KVStorageBackend>& kv_backend,
+                                     bool use_od,
                                      TransferMetric* transfer_metric)
     : engine_(engine),
       memcpy_pool_(std::make_unique<MemcpyWorkerPool>()),
-      fileread_pool_(std::make_unique<FilereadWorkerPool>(backend)),
+      fileread_pool_(std::make_unique<FilereadWorkerPool>(backend, kv_backend)),
+      use_od_(use_od),
       transfer_metric_(transfer_metric) {
     // Read MC_STORE_MEMCPY environment variable, default to false (disabled)
     const char* env_value = std::getenv("MC_STORE_MEMCPY");
@@ -720,15 +740,21 @@ std::optional<TransferFuture> TransferSubmitter::submitFileReadOperation(
     const Replica::Descriptor& replica, std::vector<Slice>& slices,
     TransferRequest::OpCode op_code) {
     auto state = std::make_shared<FilereadOperationState>();
-    auto disk_replica = replica.get_disk_descriptor();
-    std::string file_path = disk_replica.file_path;
-    size_t file_length = disk_replica.object_size;
 
-    // Submit memcpy operations to worker pool for async execution
-    FilereadTask task(file_path, file_length, slices, state);
-    fileread_pool_->submitTask(std::move(task));
-
-    VLOG(1) << "Fileread transfer submitted to worker pool with " << file_path;
+    if (use_od_) {
+        FilereadTask task(true, replica.get_disk_descriptor().file_path,
+                          slices, state);
+        fileread_pool_->submitTask(std::move(task));
+        VLOG(1) << "NDS fileread transfer submitted to worker pool for key "
+                 << replica.get_disk_descriptor().file_path;
+    } else {
+        auto disk_replica = replica.get_disk_descriptor();
+        std::string file_path = disk_replica.file_path;
+        size_t file_length = disk_replica.object_size;
+        FilereadTask task(file_path, file_length, slices, state);
+        fileread_pool_->submitTask(std::move(task));
+        VLOG(1) << "Fileread transfer submitted to worker pool with " << file_path;
+    }
 
     return TransferFuture(state);
 }
