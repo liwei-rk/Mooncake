@@ -63,11 +63,25 @@ void FilereadWorkerPool::submitTask(FilereadTask task) {
     queue_cv_.notify_one();
 }
 
+void FilereadWorkerPool::submitBatchTask(BatchFilereadTask task) {
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        if (shutdown_.load()) {
+            LOG(WARNING)
+                << "Attempting to submit batch task to shutdown FilereadWorkerPool";
+            task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+            return;
+        }
+        task_queue_.push(std::move(task));
+    }
+    queue_cv_.notify_one();
+}
+
 void FilereadWorkerPool::workerThread() {
     VLOG(2) << "FilereadWorkerPool worker thread started";
 
     while (true) {
-        FilereadTask task(false, "", {}, nullptr);
+        std::optional<FilereadTaskVariant> task_variant;
 
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
@@ -80,52 +94,85 @@ void FilereadWorkerPool::workerThread() {
             }
 
             if (!task_queue_.empty()) {
-                task = std::move(task_queue_.front());
+                task_variant = std::move(task_queue_.front());
                 task_queue_.pop();
             }
         }
 
-        if (task.state) {
-            try {
-                if (task.use_nds) {
-                    if (!kv_backend_) {
-                        LOG(ERROR) << "KV backend not initialized, cannot load NDS object";
-                        task.state->set_completed(ErrorCode::TRANSFER_FAIL);
-                        continue;
-                    }
-                    auto load_result = kv_backend_->LoadObjects(
-                        {task.nds_key}, {task.slices});
-                    if (load_result) {
-                        VLOG(2) << "NDS fileread task completed successfully for key "
-                                << task.nds_key;
-                        task.state->set_completed(ErrorCode::OK);
+        if (!task_variant) continue;
+
+        if (std::holds_alternative<FilereadTask>(*task_variant)) {
+            auto& task = std::get<FilereadTask>(*task_variant);
+            if (task.state) {
+                try {
+                    if (task.use_nds) {
+                        if (!kv_backend_) {
+                            LOG(ERROR) << "KV backend not initialized, cannot load NDS object";
+                            task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                            continue;
+                        }
+                        auto load_result = kv_backend_->LoadObjects(
+                            {task.nds_key}, {task.slices});
+                        if (load_result) {
+                            VLOG(2) << "NDS fileread task completed successfully for key "
+                                    << task.nds_key;
+                            task.state->set_completed(ErrorCode::OK);
+                        } else {
+                            LOG(ERROR) << "NDS fileread task failed for key: "
+                                       << task.nds_key
+                                       << " with error: " << toString(load_result.error());
+                            task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                        }
                     } else {
-                        LOG(ERROR) << "NDS fileread task failed for key: "
-                                   << task.nds_key
-                                   << " with error: " << toString(load_result.error());
-                        task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                        if (!backend_) {
+                            LOG(ERROR) << "Backend is not initialized, cannot load object";
+                            task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                            continue;
+                        }
+                        auto load_result = backend_->LoadObject(
+                            task.file_path, task.slices, task.object_size);
+                        if (load_result) {
+                            VLOG(2) << "Fileread task completed successfully with "
+                                    << task.file_path;
+                            task.state->set_completed(ErrorCode::OK);
+                        } else {
+                            LOG(ERROR) << "Fileread task failed for file: " << task.file_path
+                                       << " with error: " << toString(load_result.error());
+                            task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                        }
                     }
-                } else {
-                    if (!backend_) {
-                        LOG(ERROR) << "Backend is not initialized, cannot load object";
-                        task.state->set_completed(ErrorCode::TRANSFER_FAIL);
-                        continue;
-                    }
-                    auto load_result = backend_->LoadObject(
-                        task.file_path, task.slices, task.object_size);
-                    if (load_result) {
-                        VLOG(2) << "Fileread task completed successfully with "
-                                << task.file_path;
-                        task.state->set_completed(ErrorCode::OK);
-                    } else {
-                        LOG(ERROR) << "Fileread task failed for file: " << task.file_path
-                                   << " with error: " << toString(load_result.error());
-                        task.state->set_completed(ErrorCode::TRANSFER_FAIL);
-                    }
+                } catch (const std::exception& e) {
+                    LOG(ERROR) << "Exception during async fileread: " << e.what();
+                    task.state->set_completed(ErrorCode::TRANSFER_FAIL);
                 }
-            } catch (const std::exception& e) {
-                LOG(ERROR) << "Exception during async fileread: " << e.what();
-                task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+            }
+        } else if (std::holds_alternative<BatchFilereadTask>(*task_variant)) {
+            auto& task = std::get<BatchFilereadTask>(*task_variant);
+            if (task.state) {
+                try {
+                    if (!kv_backend_) {
+                        LOG(ERROR) << "KV backend not initialized, cannot load NDS batch objects";
+                        task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                        continue;
+                    }
+                    VLOG(1) << "Batch NDS fileread: loading " << task.nds_keys.size()
+                            << " keys via LoadObjects";
+                    auto load_result = kv_backend_->LoadObjects(
+                        task.nds_keys, task.batched_slices);
+                    if (load_result) {
+                        VLOG(1) << "Batch NDS fileread completed successfully for "
+                                << task.nds_keys.size() << " keys";
+                        task.state->set_completed(ErrorCode::OK);
+                    } else {
+                        LOG(ERROR) << "Batch NDS fileread failed for "
+                                   << task.nds_keys.size() << " keys"
+                                   << " with error: " << toString(load_result.error());
+                        task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                    }
+                } catch (const std::exception& e) {
+                    LOG(ERROR) << "Exception during async batch fileread: " << e.what();
+                    task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                }
             }
         }
     }
@@ -508,6 +555,10 @@ std::optional<TransferFuture> TransferSubmitter::submit_batch(
     TransferRequest::OpCode op_code) {
     if (replicas.empty() || all_slices.empty()) return std::nullopt;
 
+    if (replicas[0].is_disk_replica() && use_od_) {
+        return submitBatchFileReadOperation(replicas, all_slices, op_code);
+    }
+
     auto& first_mem_desc = replicas[0].get_memory_descriptor();
     TransferStrategy strategy =
         selectStrategy(first_mem_desc.buffer_descriptor, all_slices[0]);
@@ -763,6 +814,30 @@ std::optional<TransferFuture> TransferSubmitter::submitFileReadOperation(
         FilereadTask task(file_path, file_length, slices, state);
         fileread_pool_->submitTask(std::move(task));
         VLOG(1) << "Fileread transfer submitted to worker pool with " << file_path;
+    }
+
+    return TransferFuture(state);
+}
+
+std::optional<TransferFuture> TransferSubmitter::submitBatchFileReadOperation(
+    const std::vector<Replica::Descriptor>& replicas,
+    std::vector<std::vector<Slice>>& all_slices,
+    TransferRequest::OpCode op_code) {
+    auto state = std::make_shared<FilereadOperationState>();
+
+    std::vector<std::string> nds_keys;
+    nds_keys.reserve(replicas.size());
+    for (const auto& replica : replicas) {
+        nds_keys.push_back(replica.get_disk_descriptor().file_path);
+    }
+
+    BatchFilereadTask task(nds_keys, all_slices, state);
+    fileread_pool_->submitBatchTask(std::move(task));
+    VLOG(1) << "Batch NDS fileread transfer submitted to worker pool for "
+             << nds_keys.size() << " keys";
+
+    for (auto& slices : all_slices) {
+        updateTransferMetrics(slices, op_code);
     }
 
     return TransferFuture(state);

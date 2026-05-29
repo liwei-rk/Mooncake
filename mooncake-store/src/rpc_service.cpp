@@ -655,8 +655,15 @@ std::vector<tl::expected<void, ErrorCode>> WrappedMasterService::BatchPutRevoke(
     results.reserve(keys.size());
 
     for (const auto& key : keys) {
-        results.emplace_back(
-            master_service_.PutRevoke(client_id, key, ReplicaType::MEMORY));
+        auto mem_result =
+            master_service_.PutRevoke(client_id, key, ReplicaType::MEMORY);
+        auto disk_result =
+            master_service_.PutRevoke(client_id, key, ReplicaType::DISK);
+        if (!mem_result && !disk_result) {
+            results.emplace_back(mem_result);
+        } else {
+            results.emplace_back();
+        }
     }
 
     size_t failure_count = 0;

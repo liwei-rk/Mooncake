@@ -11,6 +11,7 @@
 #include <queue>
 #include <string>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include "transfer_engine.h"
@@ -341,15 +342,22 @@ struct FilereadTask {
           nds_key(key),
           object_size(0),
           slices(slices_ref),
+state(std::move(s)) {}
+};
+
+struct BatchFilereadTask {
+    std::vector<std::string> nds_keys;
+    std::vector<std::vector<Slice>> batched_slices;
+    std::shared_ptr<FilereadOperationState> state;
+
+    BatchFilereadTask(const std::vector<std::string>& keys,
+                      const std::vector<std::vector<Slice>>& slices_ref,
+                      std::shared_ptr<FilereadOperationState> s)
+        : nds_keys(keys),
+          batched_slices(slices_ref),
           state(std::move(s)) {}
 };
 
-/**
- * @brief Thread pool for asynchronous memcpy operations
- *
- * This class manages a single worker thread that executes memcpy operations
- * asynchronously.
- */
 class FilereadWorkerPool {
    public:
     explicit FilereadWorkerPool(std::shared_ptr<StorageBackend>& backend,
@@ -368,11 +376,14 @@ class FilereadWorkerPool {
      */
     void submitTask(FilereadTask task);
 
+    void submitBatchTask(BatchFilereadTask task);
+
    private:
     void workerThread();
 
+    using FilereadTaskVariant = std::variant<FilereadTask, BatchFilereadTask>;
     std::vector<std::thread> workers_;
-    std::queue<FilereadTask> task_queue_;
+    std::queue<FilereadTaskVariant> task_queue_;
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     std::atomic<bool> shutdown_;
@@ -475,6 +486,11 @@ class TransferSubmitter {
 
     std::optional<TransferFuture> submitFileReadOperation(
         const Replica::Descriptor& replica, std::vector<Slice>& slices,
+        TransferRequest::OpCode op_code);
+
+    std::optional<TransferFuture> submitBatchFileReadOperation(
+        const std::vector<Replica::Descriptor>& replicas,
+        std::vector<std::vector<Slice>>& all_slices,
         TransferRequest::OpCode op_code);
 
     /**

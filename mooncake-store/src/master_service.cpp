@@ -955,7 +955,13 @@ std::vector<tl::expected<void, ErrorCode>> MasterService::BatchPutRevoke(
     std::vector<tl::expected<void, ErrorCode>> results;
     results.reserve(keys.size());
     for (const auto& key : keys) {
-        results.emplace_back(PutRevoke(client_id, key, ReplicaType::MEMORY));
+        auto mem_result = PutRevoke(client_id, key, ReplicaType::MEMORY);
+        auto disk_result = PutRevoke(client_id, key, ReplicaType::DISK);
+        if (!mem_result && !disk_result) {
+            results.emplace_back(mem_result);
+        } else {
+            results.emplace_back();
+        }
     }
     return results;
 }

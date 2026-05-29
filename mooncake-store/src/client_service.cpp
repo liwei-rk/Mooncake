@@ -859,7 +859,8 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGetWhenPreferSameNode(
     }
     return results;
 }
-    std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
+    
+std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
     const std::vector<std::string>& object_keys,
     const std::vector<QueryResult>& query_results,
     std::unordered_map<std::string, std::vector<Slice>>& slices,
@@ -869,77 +870,136 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGetWhenPreferSameNode(
     results.resize(object_keys.size());
     size_t total_cache_hits = 0;
 
-    struct PendingTransfer {
-        size_t index;
-        std::string key;
-        TransferFuture future;
-        Replica::Descriptor replica;
-        bool cache_used;
-    };
-    std::vector<PendingTransfer> pending_transfers;
+    if (use_od_) {
+        std::vector<Replica::Descriptor> batch_replicas;
+        std::vector<std::vector<Slice>> batch_slices;
+        std::vector<size_t> batch_indices;
 
-    for (size_t i = 0; i < object_keys.size(); ++i) {
-        const auto& key = object_keys[i];
-        const auto& query_result = query_results[i];
+        for (size_t i = 0; i < object_keys.size(); ++i) {
+            const auto& key = object_keys[i];
+            const auto& query_result = query_results[i];
 
-        auto slices_it = slices.find(key);
-        if (slices_it == slices.end()) {
-            results[i] = tl::unexpected(ErrorCode::INVALID_PARAMS);
-            continue;
-        }
-
-        Replica::Descriptor replica;
-        ErrorCode err = FindFirstCompleteReplica(query_result.replicas, replica);
-        if (err != ErrorCode::OK) {
-            if (err == ErrorCode::INVALID_REPLICA) {
-                LOG(ERROR) << "no_complete_replicas_found key=" << key;
+            auto slices_it = slices.find(key);
+            if (slices_it == slices.end()) {
+                results[i] = tl::unexpected(ErrorCode::INVALID_PARAMS);
+                continue;
             }
-            results[i] = tl::unexpected(err);
-            continue;
+
+            Replica::Descriptor replica;
+            ErrorCode err = FindFirstCompleteReplica(query_result.replicas, replica);
+            if (err != ErrorCode::OK) {
+                if (err == ErrorCode::INVALID_REPLICA) {
+                    LOG(ERROR) << "no_complete_replicas_found key=" << key;
+                }
+                results[i] = tl::unexpected(err);
+                continue;
+            }
+
+            batch_replicas.push_back(std::move(replica));
+            batch_slices.push_back(slices_it->second);
+            batch_indices.push_back(i);
         }
 
-        bool cache_used = false;
-        if (hot_cache_ && replica.is_memory_replica()) {
-            cache_used = RedirectToHotCache(key, replica);
-            if (cache_used) {
-                total_cache_hits++;
+        if (!batch_replicas.empty()) {
+            auto future = transfer_submitter_->submit_batch(
+                batch_replicas, batch_slices, TransferRequest::READ);
+            if (!future) {
+                LOG(ERROR) << "Failed to submit batch NDS transfer for "
+                           << batch_replicas.size() << " keys";
+                for (size_t idx : batch_indices) {
+                    results[idx] = tl::unexpected(ErrorCode::TRANSFER_FAIL);
+                }
+            } else {
+                VLOG(1) << "Submitted batch NDS transfer for "
+                         << batch_replicas.size() << " keys";
+                ErrorCode batch_result = future->get();
+                if (batch_result != ErrorCode::OK) {
+                    LOG(ERROR) << "Batch NDS transfer failed";
+                    for (size_t idx : batch_indices) {
+                        results[idx] = tl::unexpected(batch_result);
+                    }
+                } else {
+                    VLOG(1) << "Batch NDS transfer succeeded for "
+                             << batch_replicas.size() << " keys";
+                    for (size_t idx : batch_indices) {
+                        results[idx] = {};
+                    }
+                }
             }
         }
+    } else {
+        struct PendingTransfer {
+            size_t index;
+            std::string key;
+            TransferFuture future;
+            Replica::Descriptor replica;
+            bool cache_used;
+        };
+        std::vector<PendingTransfer> pending_transfers;
 
-        auto future = transfer_submitter_->submit(replica, slices_it->second,
-                                                   TransferRequest::READ);
-        if (!future) {
+        for (size_t i = 0; i < object_keys.size(); ++i) {
+            const auto& key = object_keys[i];
+            const auto& query_result = query_results[i];
+
+            auto slices_it = slices.find(key);
+            if (slices_it == slices.end()) {
+                results[i] = tl::unexpected(ErrorCode::INVALID_PARAMS);
+                continue;
+            }
+
+            Replica::Descriptor replica;
+            ErrorCode err = FindFirstCompleteReplica(query_result.replicas, replica);
+            if (err != ErrorCode::OK) {
+                if (err == ErrorCode::INVALID_REPLICA) {
+                    LOG(ERROR) << "no_complete_replicas_found key=" << key;
+                }
+                results[i] = tl::unexpected(err);
+                continue;
+            }
+
+            bool cache_used = false;
+            if (hot_cache_ && replica.is_memory_replica()) {
+                cache_used = RedirectToHotCache(key, replica);
+                if (cache_used) {
+                    total_cache_hits++;
+                }
+            }
+
+            auto future = transfer_submitter_->submit(replica, slices_it->second,
+                                                       TransferRequest::READ);
+            if (!future) {
+                if (hot_cache_ && cache_used) {
+                    hot_cache_->ReleaseHotKey(key);
+                }
+                LOG(ERROR) << "Failed to submit transfer operation for key: "
+                           << key;
+                results[i] = tl::unexpected(ErrorCode::TRANSFER_FAIL);
+                continue;
+            }
+
+            VLOG(1) << "Submitted transfer for key " << key;
+            pending_transfers.emplace_back(i, key, std::move(*future), replica,
+                                           cache_used);
+        }
+
+        for (auto& [index, key, future, stored_replica, cache_used] :
+             pending_transfers) {
+            ErrorCode result = future.get();
+
             if (hot_cache_ && cache_used) {
                 hot_cache_->ReleaseHotKey(key);
             }
-            LOG(ERROR) << "Failed to submit transfer operation for key: "
-                       << key;
-            results[i] = tl::unexpected(ErrorCode::TRANSFER_FAIL);
-            continue;
-        }
-
-        VLOG(1) << "Submitted transfer for key " << key;
-        pending_transfers.emplace_back(i, key, std::move(*future), replica,
-                                       cache_used);
-    }
-
-    for (auto& [index, key, future, stored_replica, cache_used] :
-         pending_transfers) {
-        ErrorCode result = future.get();
-
-        if (hot_cache_ && cache_used) {
-            hot_cache_->ReleaseHotKey(key);
-        }
-        if (result != ErrorCode::OK) {
-            LOG(ERROR) << "Transfer failed for key: " << key;
-            results[index] = tl::unexpected(result);
-        } else {
-            results[index] = {};
-            if (hot_cache_) {
-                auto slices_it = slices.find(key);
-                if (slices_it != slices.end() &&
-                    ShouldAdmitToHotCache(key, cache_used)) {
-                    ProcessSlicesAsync(key, slices_it->second, stored_replica);
+            if (result != ErrorCode::OK) {
+                LOG(ERROR) << "Transfer failed for key: " << key;
+                results[index] = tl::unexpected(result);
+            } else {
+                results[index] = {};
+                if (hot_cache_) {
+                    auto slices_it = slices.find(key);
+                    if (slices_it != slices.end() &&
+                        ShouldAdmitToHotCache(key, cache_used)) {
+                        ProcessSlicesAsync(key, slices_it->second, stored_replica);
+                    }
                 }
             }
         }
@@ -1530,7 +1590,12 @@ void Client::FinalizeBatchPut(std::vector<PutOperation>& ops) {
 
     // Process failed operations that need cleanup
     if (!failed_keys.empty()) {
+        auto t_revoke_start = std::chrono::steady_clock::now();
         auto revoke_responses = master_client_.BatchPutRevoke(failed_keys);
+        LOG(INFO) << "[FinalizeBatchPut] BatchPutRevoke(MEMORY+DISK) RPC: "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         std::chrono::steady_clock::now() - t_revoke_start).count()
+                  << " us for " << failed_keys.size() << " keys";
         if (revoke_responses.size() != failed_keys.size()) {
             LOG(ERROR) << "BatchPutRevoke response size mismatch: expected "
                        << failed_keys.size() << ", got "
