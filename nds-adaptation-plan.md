@@ -819,6 +819,76 @@ python nds_thread_stress_test.py \
 
 ---
 
+### 9.4 nds_data_correctness_test.py — Python 数据正确性验证
+
+**定位：** `mooncake-store/tests/nds_data_correctness_test.py`，单进程单线程，专注于 NDS 数据读写正确性验证，不关心性能。
+
+**核心设计：** 写入可验证的模式数据（`0-250` 循环 pattern），读取后逐字节校验。由于 NDS 注册在同一内存区域，Put 后源内存可能被覆盖，因此不使用内存对比——而是写入已知 pattern，清零源内存后读取，验证读回数据是否与 pattern 一致。
+
+**数据模式：** `(np.arange(block_size, dtype=np.uint32) % 251).astype(np.uint8)` — 即 `0, 1, 2, ..., 250, 0, 1, 2, ...` 循环填充每个 block，长度由 `--block-size` 决定。
+
+**测试阶段：**
+
+| Phase | 测试内容 | 关键逻辑 |
+|---|---|---|
+| Phase 1 | 单键 Put → Get | 3 个 key 逐个 `put_from` → 清零源内存 → 逐个 `get_into` → 逐 block 验证 pattern |
+| Phase 2 | BatchPut → BatchGet | `batch_put_from` N 个 key → 清零源内存 → `batch_get_into` → 逐 block 验证 pattern |
+| Phase 3 | DISK replica 读取 | Put 数据（MEMORY + DISK 副本均存在） → Remove 全部 → 重新 Put → **清零整个 buffer** → `batch_get_into` → 验证读回数据是否正确（模拟 MEMORY 副本失效，强制走 DISK/NDS 路径） |
+| Phase 4 | Remove + 验证对象已删除 | Remove 所有 key → `get_into` 已删除 key → 验证返回 length ≤ 0 |
+| Phase 5 | RemoveByRegex | Put 3 个 `regex_test_*` key → `remove_by_regex("^regex_test_")` → 逐 key `get_into` → 验证均返回失败 |
+
+**Phase 3 DISK 测试的关键设计：**
+```
+1. batch_put_from → 数据写入 NDS (DISK replica)
+2. buf[:] = 0 → 清零整个 mmap buffer（包括注册的 segment 内存）
+3. batch_get_into → 数据必须从 DISK replica 读取（内存已全零）
+4. verify_buffer → 校验读回数据是否匹配 pattern
+```
+这模拟了 MEMORY 副本被淘汰或失效的场景，验证 NDS DISK 路径的数据完整性。
+
+**命令行参数：**
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--block-size` | `4096` | 单个数据 block 大小（字节） |
+| `--batch-size` | `4` | BatchPut/BatchGet 的 key 数量 |
+| `--protocol` | `tcp` | 传输协议 |
+| `--device-name` | `""` | RDMA 设备名 |
+| `--local-hostname` | `127.0.0.1:0` | 本地 hostname |
+| `--global-segment-size` | `64` | 全局 segment 大小（MB） |
+| `--master-binary` | `""` | mooncake_master 路径 |
+
+**运行命令示例：**
+```bash
+# 默认正确性测试
+python nds_data_correctness_test.py
+
+# 自定义 block/batch 大小
+python nds_data_correctness_test.py \
+  --block-size=65536 \
+  --batch-size=8
+
+# RDMA 模式
+python nds_data_correctness_test.py \
+  --protocol=rdma \
+  --device-name=mlx5_0
+```
+
+**输出：** 逐 Phase PASS/FAIL 日志 + 最终汇总 "ALL TESTS PASSED" 或 "SOME TESTS FAILED"。进程退出码 0 = 全部通过，1 = 有失败。
+
+**与压力测试脚本的核心区别：**
+
+| 对比项 | nds_stress_test.py / nds_thread_stress_test.py | nds_data_correctness_test.py |
+|---|---|---|
+| 目标 | 压力/带宽/线程安全 | 数据读写正确性 |
+| 并发 | 多进程/多线程 | 单线程 |
+| 数据校验 | 无（只检查 retcode） | 逐字节 pattern 校验 |
+| DISK 测试 | 无 | Phase 3 专门验证 DISK replica 读取 |
+| Remove 测试 | 仅 eviction 窗口清理 | Phase 4+5 专门验证 Remove/RemoveByRegex |
+| 持续时间 | 可配置 duration | 立即完成（秒级） |
+
+---
+
 ## 十、构建变更
 
 - 移除 `ndsclient` 库链接依赖（不再需要静态编译的 mock 库）
