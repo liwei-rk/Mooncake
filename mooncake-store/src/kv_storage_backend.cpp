@@ -44,48 +44,17 @@ struct NDSLoader {
 
         handle = dlopen(lib_path.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (!handle) {
-            LOG(ERROR) << "Failed to load " << lib_path << ": " << dlerror();
             return false;
         }
 
-        dlerror();
         init = (NDS_init_fn)dlsym(handle, "init");
-        const char* dlsym_error = dlerror();
-        if (dlsym_error) { LOG(ERROR) << "dlsym 'init' failed: " << dlsym_error; }
-
-        dlerror();
         isExists = (NDS_isExists_fn)dlsym(handle, "isExists");
-        dlsym_error = dlerror();
-        if (dlsym_error) { LOG(ERROR) << "dlsym 'isExists' failed: " << dlsym_error; }
-
-        dlerror();
         get = (NDS_get_fn)dlsym(handle, "get");
-        dlsym_error = dlerror();
-        if (dlsym_error) { LOG(ERROR) << "dlsym 'get' failed: " << dlsym_error; }
-
-        dlerror();
         put = (NDS_put_fn)dlsym(handle, "put");
-        dlsym_error = dlerror();
-        if (dlsym_error) { LOG(ERROR) << "dlsym 'put' failed: " << dlsym_error; }
-
-        dlerror();
         batchGet = (NDS_batchGet_fn)dlsym(handle, "batchGet");
-        dlsym_error = dlerror();
-        if (dlsym_error) { LOG(ERROR) << "dlsym 'batchGet' failed: " << dlsym_error; }
-
-        dlerror();
         batchPut = (NDS_batchPut_fn)dlsym(handle, "batchPut");
-        dlsym_error = dlerror();
-        if (dlsym_error) { LOG(ERROR) << "dlsym 'batchPut' failed: " << dlsym_error; }
 
         if (!init || !get || !put || !batchGet || !batchPut) {
-            LOG(ERROR) << "Failed to load required NDS functions"
-                       << " (init=" << (init ? "ok" : "MISSING")
-                       << " get=" << (get ? "ok" : "MISSING")
-                       << " put=" << (put ? "ok" : "MISSING")
-                       << " batchGet=" << (batchGet ? "ok" : "MISSING")
-                       << " batchPut=" << (batchPut ? "ok" : "MISSING")
-                       << ")";
             dlclose(handle);
             handle = nullptr;
             return false;
