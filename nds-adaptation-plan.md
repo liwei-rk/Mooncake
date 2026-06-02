@@ -292,9 +292,9 @@ BatchGet (use_od_=true):
 typedef int32_t (*NDS_get_fn)(uint64_t, uint8_t*, size_t, size_t, uint32_t);
 typedef int32_t (*NDS_put_fn)(uint64_t, uint8_t*, size_t, size_t, uint32_t);
 typedef int32_t (*NDS_batchGet_fn)(const uint64_t*, uint8_t**, const size_t*,
-                                   const size_t*, const uint32_t*, size_t);
+                                   const size_t*, const uint32_t*, uint32_t);
 typedef int32_t (*NDS_batchPut_fn)(const uint64_t*, uint8_t**, const size_t*,
-                                   const size_t*, const uint32_t*, size_t);
+                                   const size_t*, const uint32_t*, uint32_t);
 ```
 
 **nsid 传递机制：**

@@ -15,9 +15,9 @@ typedef int32_t (*NDS_isExists_fn)(const uint64_t*, size_t);
 typedef int32_t (*NDS_get_fn)(uint64_t, uint8_t*, size_t, size_t, uint32_t);
 typedef int32_t (*NDS_put_fn)(uint64_t, uint8_t*, size_t, size_t, uint32_t);
 typedef int32_t (*NDS_batchGet_fn)(const uint64_t*, uint8_t**, const size_t*,
-                                   const size_t*, const uint32_t*, size_t);
+                                   const size_t*, const uint32_t*, uint32_t);
 typedef int32_t (*NDS_batchPut_fn)(const uint64_t*, uint8_t**, const size_t*,
-                                   const size_t*, const uint32_t*, size_t);
+                                   const size_t*, const uint32_t*, uint32_t);
 
 struct NDSLoader {
     void* handle = nullptr;
@@ -44,19 +44,48 @@ struct NDSLoader {
 
         handle = dlopen(lib_path.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (!handle) {
-            // LOG(ERROR) << "Failed to load " << lib_path << ": " << dlerror();
+            LOG(ERROR) << "Failed to load " << lib_path << ": " << dlerror();
             return false;
         }
 
+        dlerror();
         init = (NDS_init_fn)dlsym(handle, "init");
+        const char* dlsym_error = dlerror();
+        if (dlsym_error) { LOG(ERROR) << "dlsym 'init' failed: " << dlsym_error; }
+
+        dlerror();
         isExists = (NDS_isExists_fn)dlsym(handle, "isExists");
+        dlsym_error = dlerror();
+        if (dlsym_error) { LOG(ERROR) << "dlsym 'isExists' failed: " << dlsym_error; }
+
+        dlerror();
         get = (NDS_get_fn)dlsym(handle, "get");
+        dlsym_error = dlerror();
+        if (dlsym_error) { LOG(ERROR) << "dlsym 'get' failed: " << dlsym_error; }
+
+        dlerror();
         put = (NDS_put_fn)dlsym(handle, "put");
+        dlsym_error = dlerror();
+        if (dlsym_error) { LOG(ERROR) << "dlsym 'put' failed: " << dlsym_error; }
+
+        dlerror();
         batchGet = (NDS_batchGet_fn)dlsym(handle, "batchGet");
+        dlsym_error = dlerror();
+        if (dlsym_error) { LOG(ERROR) << "dlsym 'batchGet' failed: " << dlsym_error; }
+
+        dlerror();
         batchPut = (NDS_batchPut_fn)dlsym(handle, "batchPut");
+        dlsym_error = dlerror();
+        if (dlsym_error) { LOG(ERROR) << "dlsym 'batchPut' failed: " << dlsym_error; }
 
         if (!init || !get || !put || !batchGet || !batchPut) {
-            LOG(ERROR) << "Failed to load NDS functions";
+            LOG(ERROR) << "Failed to load required NDS functions"
+                       << " (init=" << (init ? "ok" : "MISSING")
+                       << " get=" << (get ? "ok" : "MISSING")
+                       << " put=" << (put ? "ok" : "MISSING")
+                       << " batchGet=" << (batchGet ? "ok" : "MISSING")
+                       << " batchPut=" << (batchPut ? "ok" : "MISSING")
+                       << ")";
             dlclose(handle);
             handle = nullptr;
             return false;
