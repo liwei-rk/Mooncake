@@ -2284,6 +2284,12 @@ void Client::PrepareStorageBackend(const std::string& storage_root_dir,
     std::string real_fsdir = "moon_" + fsdir;
     if (use_od_) {
         kv_storage_backend_ = std::make_shared<KVStorageBackend>();
+        const char* nsid_env = std::getenv("MC_NDS_NSID");
+        if (nsid_env) {
+            uint32_t nsid_val = static_cast<uint32_t>(std::strtoul(nsid_env, nullptr, 10));
+            kv_storage_backend_->setNsid(nsid_val);
+            LOG(INFO) << "NDS nsid set from MC_NDS_NSID: " << nsid_val;
+        }
     } else {
 #ifdef USE_3FS
         std::filesystem::path root_path(storage_root_dir);

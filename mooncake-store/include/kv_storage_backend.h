@@ -40,10 +40,14 @@ class KVStorageBackend {
     void RemoveByRegex(const std::string& key);
     void RemoveAll();
 
+    void setNsid(uint32_t nsid) { nsid_ = nsid; }
+    uint32_t nsid() const { return nsid_; }
+
     private:
     bool owns_nds_memory_{false};
     void* nds_mem_addr_ = nullptr;
     uint64_t nds_mem_size_ = 0;
+    uint32_t nsid_{0};
     std::atomic<bool> initialized_{false};
 };
 

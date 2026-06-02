@@ -11,7 +11,7 @@
 | 文件路径 | 说明 |
 |---|---|
 | `mooncake-store/include/kv_storage_backend.h` | KVStorageBackend 类声明：Init/CleanupNDS/isInitialized/StoreObjects/LoadObjects/Remove 等 |
-| `mooncake-store/src/kv_storage_backend.cpp` | 308 行完整实现：NDSLoader（dlopen 动态加载 libndskv.so）、batch Put/Get 零拷贝、contiguous 校验、计时日志 |
+| `mooncake-store/src/kv_storage_backend.cpp` | 310 行完整实现：NDSLoader（dlopen 动态加载 libndskv.so + nsid 参数）、batch Put/Get 零拷贝、contiguous 校验、计时日志 |
 | `mooncake-store/tests/nds_client_test.cpp` | 537 行 C++ 单元测试：NDS Client 全流程（创建/注册内存/Put/Get/批量操作） |
 | `mooncake-store/tests/nds_stress_test.py` | 643 行 Python 压力测试 |
 | `mooncake-store/tests/nds_thread_stress_test.py` | 598 行 Python 多线程压力测试 |
@@ -283,9 +283,33 @@ BatchGet (use_od_=true):
 **nds_interface.h：**
 - 移除注释文档，新增 `batchGet/batchPut` 方法签名
 - 新增 `extern "C"` 声明（init/get/put/batchGet/batchPut）
+- **所有 get/put/batchGet/batchPut 签名新增 `uint32_t nsid` / `const uint32_t* nsids` 参数**
+- `isExists` 签名改为 `(const uint64_t*, size_t)`（原为 `(uint64_t*, int32_t)`）
+- `batchGet/batchPut` 最后参数改为 `size_t count`（原为 `int32_t`），新增 `const uint32_t* nsids` 参数
 
-**Makefile：**
-- 从编译 mock 库改为 header-only（无编译目标）
+**NDSLoader typedefs 对应更新：**
+```cpp
+typedef int32_t (*NDS_get_fn)(uint64_t, uint8_t*, size_t, size_t, uint32_t);
+typedef int32_t (*NDS_put_fn)(uint64_t, uint8_t*, size_t, size_t, uint32_t);
+typedef int32_t (*NDS_batchGet_fn)(const uint64_t*, uint8_t**, const size_t*,
+                                   const size_t*, const uint32_t*, size_t);
+typedef int32_t (*NDS_batchPut_fn)(const uint64_t*, uint8_t**, const size_t*,
+                                   const size_t*, const uint32_t*, size_t);
+```
+
+**nsid 传递机制：**
+- 环境变量 `MC_NDS_NSID`（uint32_t 十进制字符串）在 `Client::Create` 中读取
+- `PrepareStorageBackend` 创建 `KVStorageBackend` 后立即调用 `setNsid(nsid_val)` 保存
+- `KVStorageBackend` 内部成员 `nsid_`：每次调用 `batchPut/batchGet` 时自动填充 `std::vector<uint32_t> nsids(count, nsid_)` 传给 NDSLoader
+- `LoadObjects` 在 `FilereadWorkerPool::workerThread` 中调用——kv_storage_backend_ 已持有 nsid_，无需 FilereadTask/BatchFilereadTask 传递
+
+**KVStorageBackend 新增：**
+```cpp
+void setNsid(uint32_t nsid);
+uint32_t nsid() const;
+// private:
+uint32_t nsid_{0};
+```
 
 ### 3.12 CMake 变更
 
@@ -342,7 +366,7 @@ private:
 ```cpp
 struct NDSLoader {
     void* handle;                      // dlopen handle
-    NDS_init_fn / get / put / batchGet / batchPut;  // 动态加载的函数指针
+    NDS_init_fn / isExists / get / put / batchGet / batchPut;  // 动态加载的函数指针
     bool nds_initialized;              // 全局初始化状态
     void* nds_mem_addr;                // 全局 NDS 内存地址
     uint64_t nds_mem_size;
@@ -387,6 +411,8 @@ struct NDSLoader {
 | NDS init 由 RegisterLocalMemory 触发 | 零拷贝要求源数据地址在 NDS 内存区域内；register_buffer 时才知道可用内存 |
 | 不使用单独 InitNDS 方法 | 用户明确要求复用 `Init(void*, uint64_t)` 签名 |
 | NDSLoader 全局单例 | NDS C API 全是全局状态操作，不支持多实例 |
+| nsid 存储在 KVStorageBackend 中 | NDSLoader 是全局单例无法存储 per-client 状态；KVStorageBackend 与 Client 1:1 绑定，StoreObjects/LoadObjects 内部自动填充 nsids |
+| MC_NDS_NSID 环境变量在 Client::Create 中读取 | nsid 是部署级配置，不暴露给上层 API；Client::Create 调 PrepareStorageBackend 时一次性设置 |
 | use_od=true 无 root_fs_dir 时 master 返回 DISK replica | 盘框场景不需要文件路径，file_path 为空字符串 |
 | CleanupNDS() 是 public 方法 | 供 unregisterLocalMemory 和析构函数调用 |
 | batchPut 整批异步提交 | 减少 RPC 调用次数，StoreObjects 一次处理所有 disk key |

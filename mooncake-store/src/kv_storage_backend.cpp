@@ -11,13 +11,13 @@ namespace mooncake {
 namespace {
 
 typedef int32_t (*NDS_init_fn)(void*, uint64_t);
-typedef int32_t (*NDS_isExists_fn)(uint64_t*, int32_t);
-typedef int32_t (*NDS_get_fn)(uint64_t, uint8_t*, size_t, size_t);
-typedef int32_t (*NDS_put_fn)(uint64_t, uint8_t*, size_t, size_t);
-typedef int32_t (*NDS_batchGet_fn)(uint64_t*, uint8_t**, size_t*, size_t*,
-                                   int32_t);
-typedef int32_t (*NDS_batchPut_fn)(uint64_t*, uint8_t**, size_t*, size_t*,
-                                   int32_t);
+typedef int32_t (*NDS_isExists_fn)(const uint64_t*, size_t);
+typedef int32_t (*NDS_get_fn)(uint64_t, uint8_t*, size_t, size_t, uint32_t);
+typedef int32_t (*NDS_put_fn)(uint64_t, uint8_t*, size_t, size_t, uint32_t);
+typedef int32_t (*NDS_batchGet_fn)(const uint64_t*, uint8_t**, const size_t*,
+                                   const size_t*, const uint32_t*, size_t);
+typedef int32_t (*NDS_batchPut_fn)(const uint64_t*, uint8_t**, const size_t*,
+                                   const size_t*, const uint32_t*, size_t);
 
 struct NDSLoader {
     void* handle = nullptr;
@@ -218,9 +218,10 @@ tl::expected<std::vector<std::string>, ErrorCode> KVStorageBackend::StoreObjects
                      t_flatten_end - t0).count() << " us";
 
     auto& loader = NDSLoader::Instance();
+    std::vector<uint32_t> nsids(blockIds.size(), nsid_);
     int32_t result = loader.batchPut(blockIds.data(), blockAddrs.data(),
                                      nds_offsets.data(), nds_lengths.data(),
-                                     static_cast<int32_t>(blockIds.size()));
+                                     nsids.data(), blockIds.size());
     auto t_batchput_end = std::chrono::steady_clock::now();
     LOG(INFO) << "[BatchPut] KVStoreObjects NDS batchPut call: "
               << std::chrono::duration_cast<std::chrono::microseconds>(
@@ -281,9 +282,10 @@ tl::expected<void, ErrorCode> KVStorageBackend::LoadObjects(
     }
 
     auto& loader = NDSLoader::Instance();
+    std::vector<uint32_t> nsids(blockIds.size(), nsid_);
     int32_t result = loader.batchGet(blockIds.data(), blockAddrs.data(),
                                      nds_offsets.data(), nds_lengths.data(),
-                                     static_cast<int32_t>(blockIds.size()));
+                                     nsids.data(), blockIds.size());
     if (result != 0) {
         // LOG(ERROR) << "NDS batchGet failed: " << result
         //            << " for " << blockIds.size() << " slices";
