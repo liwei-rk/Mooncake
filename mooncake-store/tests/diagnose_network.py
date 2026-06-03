@@ -123,8 +123,18 @@ def main():
     alive = proc.poll() is None
     print("  Process alive: {}".format(alive))
 
-    print("\n=== Step 2: Check RPC TCP port {} ===".format(rpc_port))
-    tcp_ok = check_tcp_port("127.0.0.1", rpc_port)
+    print("\n=== Step 2: Check RPC TCP port {} (with retry) ===".format(rpc_port))
+    rpc_deadline = time.time() + 10.0
+    tcp_ok = False
+    while time.time() < rpc_deadline:
+        if proc.poll() is not None:
+            print("  Master process died during RPC port check (code={})".format(proc.returncode))
+            break
+        tcp_ok = check_tcp_port("127.0.0.1", rpc_port, timeout=1.0)
+        if tcp_ok:
+            break
+        print("  ... RPC port not ready yet, waiting...")
+        time.sleep(0.5)
     print("  RPC port reachable: {}".format(tcp_ok))
 
     print("\n=== Step 3: Check HTTP metadata port {} (TCP level) ===".format(http_port))
@@ -188,7 +198,18 @@ def main():
     else:
         print("CONCLUSION: Mixed results, see details above.")
 
+    print("\n=== Master log (last 30 lines) ===")
+    log_file.flush()
+    try:
+        with open(log_path, "r") as f:
+            lines = f.readlines()
+        for line in lines[-30:]:
+            print("  {}".format(line.rstrip()))
+    except Exception:
+        print("  (could not read log)")
+
     print("\n=== Cleanup ===")
+    print("  Log file preserved at: {}".format(log_path))
     if proc.poll() is None:
         proc.terminate()
         try:
@@ -197,8 +218,7 @@ def main():
             proc.kill()
             proc.wait(timeout=2)
     log_file.close()
-    os.remove(log_path)
-    print("Master stopped, log removed.")
+    print("Master stopped. Log NOT removed so you can inspect it.")
 
 
 if __name__ == "__main__":
