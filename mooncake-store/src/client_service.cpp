@@ -1432,7 +1432,6 @@ if (!nds_keys.empty()) {
 }
 
 void Client::WaitForTransfers(std::vector<PutOperation>& ops) {
-    auto t_wf_t0 = std::chrono::steady_clock::now();
     for (auto& op : ops) {
         // Skip operations that already failed or completed
         if (op.IsResolved()) {
@@ -1451,13 +1450,7 @@ void Client::WaitForTransfers(std::vector<PutOperation>& ops) {
         size_t failed_transfer_idx = 0;
 
         for (size_t i = 0; i < op.pending_transfers.size(); ++i) {
-            auto t_fut = std::chrono::steady_clock::now();
-            ErrorCode transfer_result = op.pending_transfers[i].get();
-            LOG(INFO) << "[WaitForTransfers] future[" << i << "] key="
-                      << op.key << ": "
-                      << std::chrono::duration_cast<std::chrono::microseconds>(
-                             std::chrono::steady_clock::now() - t_fut).count()
-                      << " us, result=" << toString(transfer_result);
+ErrorCode transfer_result = op.pending_transfers[i].get();
             if (transfer_result != ErrorCode::OK) {
                 if (all_transfers_succeeded) {
                     // Record the first error for reporting
@@ -1482,14 +1475,9 @@ void Client::WaitForTransfers(std::vector<PutOperation>& ops) {
             op.SetError(first_error, error_context);
         }
     }
-    LOG(INFO) << "[WaitForTransfers] total: "
-              << std::chrono::duration_cast<std::chrono::microseconds>(
-                     std::chrono::steady_clock::now() - t_wf_t0).count()
-              << " us";
 }
 
 void Client::FinalizeBatchPut(std::vector<PutOperation>& ops) {
-    auto t_fb_t0 = std::chrono::steady_clock::now();
     // For each operation,
     // If transfers completed successfully, we need to call BatchPutEnd
     // If the operation failed but has allocated replicas, we need to call
@@ -1609,10 +1597,6 @@ void Client::FinalizeBatchPut(std::vector<PutOperation>& ops) {
                        << " was not properly resolved";
         }
     }
-    LOG(INFO) << "[FinalizeBatchPut] total: "
-              << std::chrono::duration_cast<std::chrono::microseconds>(
-                     std::chrono::steady_clock::now() - t_fb_t0).count()
-              << " us";
 }
 
 std::vector<tl::expected<void, ErrorCode>> Client::CollectResults(
