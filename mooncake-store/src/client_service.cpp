@@ -1315,9 +1315,6 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
 
         for (size_t i = 0; i < ops.size(); ++i) {
             auto& op = ops[i];
-            LOG(INFO) << "[SubmitTransfers] op[" << i << "] key=" << op.key
-                      << " IsResolved=" << op.IsResolved()
-                      << " replicas.size()=" << op.replicas.size();
             if (op.IsResolved()) continue;
             if (op.replicas.empty()) {
                 op.SetError(ErrorCode::INTERNAL_ERROR,
@@ -1327,17 +1324,11 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
             bool has_disk_replica = false;
             for (auto it = op.replicas.rbegin(); it != op.replicas.rend();
                  ++it) {
-                LOG(INFO) << "[SubmitTransfers] op[" << i << "] replica: "
-                          << " is_memory=" << it->is_memory_replica()
-                          << " is_disk=" << it->is_disk_replica()
-                          << " is_local_disk=" << it->is_local_disk_replica()
-                          << " status=" << it->status;
                 if (it->is_disk_replica()) {
                     has_disk_replica = true;
                     break;
                 }
             }
-            LOG(INFO) << "[SubmitTransfers] op[" << i << "] has_disk_replica=" << has_disk_replica;
             if (!has_disk_replica) continue;
 
             nds_keys.emplace_back(op.key);
@@ -1348,12 +1339,19 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
             op.pending_transfers.emplace_back(TransferFuture(nds_state));
         }
 
+        LOG(INFO) << "[SubmitTransfers] nds_keys.size()=" << nds_keys.size()
+              << ", nds_slices.size()=" << nds_slices.size()
+              << ", about to enqueue to write_thread_pool_";
+
         if (!nds_keys.empty()) {
             write_thread_pool_.enqueue(
                 [this, b_keys = std::move(nds_keys),
                  b_slices = std::move(nds_slices),
                  b_states = std::move(nds_states),
                  b_indices = std::move(nds_op_indices)]() mutable {
+                    LOG(INFO) << "[NDS Lambda] ENTERED, b_keys.size()=" << b_keys.size()
+                              << ", kv_storage_backend_=" << (void*)kv_storage_backend_
+                              << ", initialized=" << (kv_storage_backend_ ? kv_storage_backend_->isInitialized() : -1);
                     auto t_lambda = std::chrono::steady_clock::now();
                     auto nds_result = kv_storage_backend_->StoreObjects(
                         b_keys, b_slices);
