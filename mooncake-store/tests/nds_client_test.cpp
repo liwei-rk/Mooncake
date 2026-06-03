@@ -179,41 +179,36 @@ TEST_F(NdsClientTest, PutAndGetMultiSliceKey) {
     const std::string key = "nds_test_multi_slice";
     const size_t slice1_size = 1 * 1024 * 1024;
     const size_t slice2_size = 2 * 1024 * 1024;
+    const size_t total_size = slice1_size + slice2_size;
 
-    std::vector<uint8_t> test_data(slice1_size + slice2_size);
+    std::vector<uint8_t> test_data(total_size);
     for (size_t i = 0; i < test_data.size(); ++i) {
         test_data[i] = static_cast<uint8_t>(i % 256);
     }
 
-    void* buf1 = AllocateBuffer(slice1_size);
-    void* buf2 = AllocateBuffer(slice2_size);
-    memcpy(buf1, test_data.data(), slice1_size);
-    memcpy(buf2, test_data.data() + slice1_size, slice2_size);
+    void* write_buf = AllocateBuffer(total_size);
+    memcpy(write_buf, test_data.data(), total_size);
     std::vector<Slice> write_slices;
-    write_slices.emplace_back(Slice{buf1, slice1_size});
-    write_slices.emplace_back(Slice{buf2, slice2_size});
+    write_slices.emplace_back(Slice{write_buf, slice1_size});
+    write_slices.emplace_back(Slice{static_cast<uint8_t*>(write_buf) + slice1_size, slice2_size});
 
     ReplicateConfig config;
     config.replica_num = 1;
     auto put_result = client_->Put(key, write_slices, config);
     ASSERT_TRUE(put_result.has_value())
         << "Put multi-slice failed: " << toString(put_result.error());
-    DeallocateBuffer(buf1, slice1_size);
-    DeallocateBuffer(buf2, slice2_size);
+    DeallocateBuffer(write_buf, total_size);
 
-    void* rbuf1 = AllocateBuffer(slice1_size);
-    void* rbuf2 = AllocateBuffer(slice2_size);
+    void* read_buf = AllocateBuffer(total_size);
     std::vector<Slice> read_slices;
-    read_slices.emplace_back(Slice{rbuf1, slice1_size});
-    read_slices.emplace_back(Slice{rbuf2, slice2_size});
+    read_slices.emplace_back(Slice{read_buf, slice1_size});
+    read_slices.emplace_back(Slice{static_cast<uint8_t*>(read_buf) + slice1_size, slice2_size});
 
     auto get_result = client_->Get(key, read_slices);
     ASSERT_TRUE(get_result.has_value())
         << "Get multi-slice failed: " << toString(get_result.error());
-    ASSERT_EQ(memcmp(rbuf1, test_data.data(), slice1_size), 0);
-    ASSERT_EQ(memcmp(rbuf2, test_data.data() + slice1_size, slice2_size), 0);
-    DeallocateBuffer(rbuf1, slice1_size);
-    DeallocateBuffer(rbuf2, slice2_size);
+    ASSERT_EQ(memcmp(read_buf, test_data.data(), total_size), 0);
+    DeallocateBuffer(read_buf, total_size);
 }
 
 TEST_F(NdsClientTest, BatchPutAndBatchGet) {
@@ -389,13 +384,12 @@ TEST_F(NdsClientTest, BatchPutWithMultiSlicePerKey) {
     }
 
     for (int i = 0; i < batch_size; ++i) {
-        void* buf1 = AllocateBuffer(slice_sizes[0]);
-        void* buf2 = AllocateBuffer(slice_sizes[1]);
-        memcpy(buf1, test_data_list[i].data(), slice_sizes[0]);
-        memcpy(buf2, test_data_list[i].data() + slice_sizes[0], slice_sizes[1]);
+        size_t total = slice_sizes[0] + slice_sizes[1];
+        void* buf = AllocateBuffer(total);
+        memcpy(buf, test_data_list[i].data(), total);
         std::vector<Slice> slices;
-        slices.emplace_back(Slice{buf1, slice_sizes[0]});
-        slices.emplace_back(Slice{buf2, slice_sizes[1]});
+        slices.emplace_back(Slice{buf, slice_sizes[0]});
+        slices.emplace_back(Slice{static_cast<uint8_t*>(buf) + slice_sizes[0], slice_sizes[1]});
         write_slices_list.push_back(std::move(slices));
     }
 
@@ -408,17 +402,17 @@ TEST_F(NdsClientTest, BatchPutWithMultiSlicePerKey) {
     }
 
     for (int i = 0; i < batch_size; ++i) {
-        DeallocateBuffer(write_slices_list[i][0].ptr, slice_sizes[0]);
-        DeallocateBuffer(write_slices_list[i][1].ptr, slice_sizes[1]);
+        size_t total = slice_sizes[0] + slice_sizes[1];
+        DeallocateBuffer(write_slices_list[i][0].ptr, total);
     }
 
     std::unordered_map<std::string, std::vector<Slice>> read_slices_map;
     for (int i = 0; i < batch_size; ++i) {
-        void* rbuf1 = AllocateBuffer(slice_sizes[0]);
-        void* rbuf2 = AllocateBuffer(slice_sizes[1]);
+        size_t total = slice_sizes[0] + slice_sizes[1];
+        void* rbuf = AllocateBuffer(total);
         std::vector<Slice> slices;
-        slices.emplace_back(Slice{rbuf1, slice_sizes[0]});
-        slices.emplace_back(Slice{rbuf2, slice_sizes[1]});
+        slices.emplace_back(Slice{rbuf, slice_sizes[0]});
+        slices.emplace_back(Slice{static_cast<uint8_t*>(rbuf) + slice_sizes[0], slice_sizes[1]});
         read_slices_map[keys[i]] = std::move(slices);
     }
 
@@ -431,13 +425,10 @@ TEST_F(NdsClientTest, BatchPutWithMultiSlicePerKey) {
     for (int i = 0; i < batch_size; ++i) {
         const auto& slices = read_slices_map[keys[i]];
         ASSERT_EQ(slices.size(), 2);
+        size_t total = slice_sizes[0] + slice_sizes[1];
         ASSERT_EQ(memcmp(slices[0].ptr, test_data_list[i].data(),
-                         slice_sizes[0]), 0);
-        ASSERT_EQ(memcmp(slices[1].ptr,
-                         test_data_list[i].data() + slice_sizes[0],
-                         slice_sizes[1]), 0);
-        DeallocateBuffer(slices[0].ptr, slice_sizes[0]);
-        DeallocateBuffer(slices[1].ptr, slice_sizes[1]);
+                         total), 0);
+        DeallocateBuffer(slices[0].ptr, total);
     }
 }
 
