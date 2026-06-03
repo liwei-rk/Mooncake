@@ -256,17 +256,16 @@ global_segment_size = args.global_segment_size * MB
         mooncake.store.set_vlog_level(2)
         mooncake.store.set_log_to_stderr(True)
 
-        mm = mmap.mmap(-1, total_buffer_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+mm = mmap.mmap(-1, total_buffer_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
         buf = np.frombuffer(mm, dtype=np.uint8, count=total_buffer_size)
         base_buf_ptr = buf.ctypes.data
 
         store = MooncakeDistributedStore()
-        local_buffer_size = 256 * MB
         retcode = store.setup(
             local_hostname=args.local_hostname,
             metadata_server=metadata_url,
             global_segment_size=global_segment_size,
-            local_buffer_size=local_buffer_size,
+            local_buffer_size=total_buffer_size,
             protocol=args.protocol,
             rdma_devices=args.device_name,
             master_server_addr=master_addr,

@@ -230,13 +230,12 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
     if local_hostname.endswith(":0"):
         local_hostname = local_hostname[:-2] + ":{}".format(find_free_port())
 
-    local_buffer_size_val = 256 * 1024 * 1024
     store = MooncakeDistributedStore()
     retcode = store.setup(
         local_hostname=local_hostname,
         metadata_server=metadata_url,
         global_segment_size=global_segment_size,
-        local_buffer_size=local_buffer_size_val,
+        local_buffer_size=buffer_size,
         protocol=protocol,
         rdma_devices=device_name,
         master_server_addr=master_addr,
