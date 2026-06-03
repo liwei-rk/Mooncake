@@ -2289,6 +2289,8 @@ void Client::PrepareStorageBackend(const std::string& storage_root_dir,
             uint32_t nsid_val = static_cast<uint32_t>(std::strtoul(nsid_env, nullptr, 10));
             kv_storage_backend_->setNsid(nsid_val);
             LOG(INFO) << "NDS nsid set from MC_NDS_NSID: " << nsid_val;
+        }else {
+            LOG(INFO) << ">>>>>>>>> NDS nsid not set from MC_NDS_NSID: ";
         }
     } else {
 #ifdef USE_3FS
