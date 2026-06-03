@@ -1429,10 +1429,6 @@ if (!nds_keys.empty()) {
                     << " transfers for key " << op.key;
         }
     }
-    LOG(INFO) << "[SubmitTransfers] total: "
-              << std::chrono::duration_cast<std::chrono::microseconds>(
-                     std::chrono::steady_clock::now() - t_submit_t0).count()
-              << " us";
 }
 
 void Client::WaitForTransfers(std::vector<PutOperation>& ops) {
