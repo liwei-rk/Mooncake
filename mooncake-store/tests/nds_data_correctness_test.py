@@ -249,7 +249,7 @@ def run_correctness_test(args):
         metadata_url = "http://127.0.0.1:{}/metadata".format(http_port)
         master_addr = "127.0.0.1:{}".format(rpc_port)
 
-        global_segment_size = args.global_segment_size * MB
+global_segment_size = args.global_segment_size * MB
 
         print(">>> Initializing store")
         mooncake.store.init_glog()
@@ -261,11 +261,12 @@ def run_correctness_test(args):
         base_buf_ptr = buf.ctypes.data
 
         store = MooncakeDistributedStore()
+        local_buffer_size = 256 * MB
         retcode = store.setup(
             local_hostname=args.local_hostname,
             metadata_server=metadata_url,
             global_segment_size=global_segment_size,
-            local_buffer_size=total_buffer_size,
+            local_buffer_size=local_buffer_size,
             protocol=args.protocol,
             rdma_devices=args.device_name,
             master_server_addr=master_addr,
