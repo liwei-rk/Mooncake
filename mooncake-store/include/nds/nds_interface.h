@@ -19,7 +19,6 @@ namespace NDS {
     int32_t batchPut(std::vector<uint64_t> blockIds, std::vector<uint8_t *> blockAddrs,
          std::vector<size_t> offsets, std::vector<size_t> lengths, std::vector<uint32_t> nsids);
 }
-#endif
 
 extern "C" {
     int32_t init(void *memAddr, uint64_t length);
