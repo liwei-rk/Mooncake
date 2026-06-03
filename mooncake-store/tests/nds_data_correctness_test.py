@@ -22,13 +22,18 @@ logger = logging.getLogger(__name__)
 
 def find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
-def wait_for_tcp_port(host, port, timeout=20.0):
+def wait_for_tcp_port(host, port, timeout=20.0, master_proc=None):
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if master_proc is not None and master_proc.poll() is not None:
+            raise RuntimeError(
+                "Master process exited unexpectedly (code={}) while waiting for TCP port {}:{}".format(
+                    master_proc.returncode, host, port))
         try:
             with socket.create_connection((host, port), timeout=0.5):
                 return True
@@ -37,18 +42,28 @@ def wait_for_tcp_port(host, port, timeout=20.0):
     raise RuntimeError("Timed out waiting for TCP port {}:{}".format(host, port))
 
 
-def wait_for_metadata_server(url, timeout=20.0):
+def wait_for_metadata_server(url, timeout=20.0, master_proc=None):
     deadline = time.time() + timeout
+    last_exc = None
     while time.time() < deadline:
+        if master_proc is not None and master_proc.poll() is not None:
+            raise RuntimeError(
+                "Master process exited unexpectedly (code={}) while waiting for metadata server {}".format(
+                    master_proc.returncode, url))
         try:
             with urllib.request.urlopen(url + "?key=nds_test_probe", timeout=1.0):
                 return True
         except urllib.error.HTTPError as exc:
             if exc.code in (200, 400, 404):
                 return True
-        except urllib.error.URLError:
+            last_exc = exc
+        except urllib.error.URLError as exc:
+            last_exc = exc
             time.sleep(0.1)
-    raise RuntimeError("Timed out waiting for metadata server {}".format(url))
+        except Exception as exc:
+            last_exc = exc
+            time.sleep(0.1)
+    raise RuntimeError("Timed out waiting for metadata server {}: last error: {}".format(url, last_exc))
 
 
 def resolve_master_binary(master_binary_arg=""):
@@ -56,9 +71,13 @@ def resolve_master_binary(master_binary_arg=""):
         return master_binary_arg
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     build_dir = os.environ.get("MOONCAKE_BUILD_DIR", "build")
-    local_binary = os.path.join(repo_root, build_dir, "mooncake-store", "src", "mooncake_master")
-    if os.path.isfile(local_binary):
-        return local_binary
+    candidates = []
+    for base_name in ["mooncake_master", "mooncake_master.exe"]:
+        local_binary = os.path.join(repo_root, build_dir, "mooncake-store", "src", base_name)
+        if os.path.isfile(local_binary):
+            candidates.append(local_binary)
+    if candidates:
+        return candidates[0]
     binary = shutil.which("mooncake_master")
     if binary:
         return binary
@@ -99,15 +118,30 @@ def start_master(args):
         text=True,
     )
 
-    metadata_url = "http://127.0.0.1:{}/metadata".format(http_port)
-    try:
-        wait_for_tcp_port("127.0.0.1", rpc_port)
-        wait_for_metadata_server(metadata_url)
-    except Exception as e:
-        print("ERROR: Master failed to start: {}".format(e))
+    time.sleep(0.5)
+    if master_proc.poll() is not None:
+        master_log_file.flush()
+        log_content = ""
         try:
             with open(master_log_path, "r") as f:
-                print("Master log:\n{}".format(f.read()[:2000]))
+                log_content = f.read()
+        except Exception:
+            pass
+        stop_master(master_proc, master_log_file, master_log_path)
+        raise RuntimeError(
+            "Master process exited immediately with code {}. Log:\n{}".format(
+                master_proc.returncode, log_content[:3000]))
+
+    metadata_url = "http://127.0.0.1:{}/metadata".format(http_port)
+    try:
+        wait_for_tcp_port("127.0.0.1", rpc_port, master_proc=master_proc)
+        wait_for_metadata_server(metadata_url, master_proc=master_proc)
+    except Exception as e:
+        print("ERROR: Master failed to start: {}".format(e))
+        master_log_file.flush()
+        try:
+            with open(master_log_path, "r") as f:
+                print("Master log:\n{}".format(f.read()[:3000]))
         except Exception:
             pass
         stop_master(master_proc, master_log_file, master_log_path)
