@@ -531,7 +531,7 @@ def run_thread_stress_test(args):
             local_hostname=args.local_hostname,
             metadata_server=metadata_url,
             global_segment_size=global_segment_size,
-            local_buffer_size=total_buffer_size,
+            local_buffer_size=0,
             protocol=args.protocol,
             rdma_devices=args.device_name,
             master_server_addr=master_addr,
