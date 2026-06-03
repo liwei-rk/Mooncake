@@ -42,6 +42,9 @@ def wait_for_tcp_port(host, port, timeout=20.0, master_proc=None):
     raise RuntimeError("Timed out waiting for TCP port {}:{}".format(host, port))
 
 
+_no_proxy_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def wait_for_metadata_server(url, timeout=20.0, master_proc=None):
     deadline = time.time() + timeout
     last_exc = None
@@ -51,12 +54,13 @@ def wait_for_metadata_server(url, timeout=20.0, master_proc=None):
                 "Master process exited unexpectedly (code={}) while waiting for metadata server {}".format(
                     master_proc.returncode, url))
         try:
-            with urllib.request.urlopen(url + "?key=nds_test_probe", timeout=1.0):
+            with _no_proxy_opener.open(url + "?key=nds_test_probe", timeout=1.0):
                 return True
         except urllib.error.HTTPError as exc:
             if exc.code in (200, 400, 404):
                 return True
             last_exc = exc
+            time.sleep(0.1)
         except urllib.error.URLError as exc:
             last_exc = exc
             time.sleep(0.1)
@@ -71,13 +75,10 @@ def resolve_master_binary(master_binary_arg=""):
         return master_binary_arg
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     build_dir = os.environ.get("MOONCAKE_BUILD_DIR", "build")
-    candidates = []
-    for base_name in ["mooncake_master", "mooncake_master.exe"]:
-        local_binary = os.path.join(repo_root, build_dir, "mooncake-store", "src", base_name)
+    for ext in ["", ".exe"]:
+        local_binary = os.path.join(repo_root, build_dir, "mooncake-store", "src", "mooncake_master" + ext)
         if os.path.isfile(local_binary):
-            candidates.append(local_binary)
-    if candidates:
-        return candidates[0]
+            return local_binary
     binary = shutil.which("mooncake_master")
     if binary:
         return binary
