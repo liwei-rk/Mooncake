@@ -1341,8 +1341,8 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                  b_states = std::move(nds_states),
                  b_indices = std::move(nds_op_indices)]() mutable {
                     LOG(INFO) << "[NDS Lambda] ENTERED, b_keys.size()=" << b_keys.size()
-                              << ", kv_storage_backend_=" << (void*)kv_storage_backend_
-                              << ", initialized=" << (kv_storage_backend_ ? kv_storage_backend_->isInitialized() : -1);
+                              << ", kv_storage_backend_=nullptr?" << (!kv_storage_backend_)
+                              << ", initialized=" << (kv_storage_backend_ ? kv_storage_backend_->isInitialized() : false);
                     auto t_lambda = std::chrono::steady_clock::now();
                     auto nds_result = kv_storage_backend_->StoreObjects(
                         b_keys, b_slices);
