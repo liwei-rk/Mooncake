@@ -11,6 +11,7 @@ import tempfile
 import urllib.request
 import urllib.error
 import logging
+import uuid
 from mooncake.store import MooncakeDistributedStore
 import mooncake.store
 
@@ -173,6 +174,10 @@ def stop_master(master_proc, master_log_file, master_log_path):
     print("    Master stopped")
 
 
+def random_keys(n):
+    return [uuid.uuid4().hex[:16] for _ in range(n)]
+
+
 def make_pattern(block_size):
     return (np.arange(block_size, dtype=np.uint32) % 251).astype(np.uint8)
 
@@ -249,14 +254,14 @@ def run_correctness_test(args):
         metadata_url = "http://127.0.0.1:{}/metadata".format(http_port)
         master_addr = "127.0.0.1:{}".format(rpc_port)
 
-global_segment_size = args.global_segment_size * MB
+        global_segment_size = args.global_segment_size * MB
 
         print(">>> Initializing store")
         mooncake.store.init_glog()
         mooncake.store.set_vlog_level(2)
         mooncake.store.set_log_to_stderr(True)
 
-mm = mmap.mmap(-1, total_buffer_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+        mm = mmap.mmap(-1, total_buffer_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
         buf = np.frombuffer(mm, dtype=np.uint8, count=total_buffer_size)
         base_buf_ptr = buf.ctypes.data
 
@@ -283,7 +288,7 @@ mm = mmap.mmap(-1, total_buffer_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOU
 
         # ── Phase 1: Single-key Put + Get ──
         print("\n>>> Phase 1: Single-key Put + Get")
-        single_keys = ["single_0", "single_1", "single_2"]
+        single_keys = random_keys(3)
         single_offset = 0
 
         fill_buffer(buf, single_offset, block_size, 3)
@@ -324,7 +329,7 @@ mm = mmap.mmap(-1, total_buffer_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOU
 
         # ── Phase 2: BatchPut + BatchGet ──
         print("\n>>> Phase 2: BatchPut + BatchGet")
-        batch_keys = ["batch_k{}".format(i) for i in range(batch_size)]
+        batch_keys = random_keys(batch_size)
         batch_offset = single_put_buffer_size
 
         fill_buffer(buf, batch_offset, block_size, batch_size)
@@ -441,7 +446,7 @@ mm = mmap.mmap(-1, total_buffer_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOU
 
         # Try to get a removed key — should fail
         test_ptr = base_buf_ptr + batch_offset
-        length = store.get_into("batch_k0", test_ptr, block_size)
+        length = store.get_into(batch_keys[0], test_ptr, block_size)
         if length > 0:
             logger.error("Get after remove succeeded — should have failed!")
             all_passed = False
@@ -450,7 +455,8 @@ mm = mmap.mmap(-1, total_buffer_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOU
 
         # ── Phase 5: RemoveByRegex ──
         print("\n>>> Phase 5: RemoveByRegex")
-        regex_keys = ["regex_test_0", "regex_test_1", "regex_test_2"]
+        regex_prefix = "rgx_" + uuid.uuid4().hex[:8] + "_"
+        regex_keys = [regex_prefix + str(i) for i in range(3)]
         fill_buffer(buf, single_offset, block_size, 3)
         for i, key in enumerate(regex_keys):
             ptr = base_buf_ptr + single_offset + i * block_size
@@ -459,7 +465,7 @@ mm = mmap.mmap(-1, total_buffer_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOU
                 logger.error("Put '{}' for regex test failed".format(key))
                 all_passed = False
 
-        removed = store.remove_by_regex("^regex_test_", force=True)
+        removed = store.remove_by_regex("^{}".format(regex_prefix), force=True)
         logger.info("RemoveByRegex removed {} objects".format(removed))
 
         # Verify they're gone

@@ -1,7 +1,6 @@
 #include "kv_storage_backend.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cstring>
 #include <dlfcn.h>
 #include <unordered_map>
@@ -197,7 +196,6 @@ void KVStorageBackend::CleanupNDS() {
 tl::expected<std::vector<std::string>, ErrorCode> KVStorageBackend::StoreObjects(
     const std::vector<std::string>& keys,
     const std::vector<std::vector<Slice>>& batched_slices) {
-    auto t0 = std::chrono::steady_clock::now();
     std::vector<uint64_t> blockIds;
     std::vector<uint8_t*> blockAddrs;
     std::vector<size_t> nds_offsets;
@@ -241,20 +239,11 @@ tl::expected<std::vector<std::string>, ErrorCode> KVStorageBackend::StoreObjects
         nds_lengths.push_back(total_slice_size);
     }
 
-    auto t_flatten_end = std::chrono::steady_clock::now();
-    LOG(INFO) << "[BatchPut] KVStoreObjects flatten slices: "
-              << std::chrono::duration_cast<std::chrono::microseconds>(
-                     t_flatten_end - t0).count() << " us";
-
     auto& loader = NDSLoader::Instance();
     std::vector<uint32_t> nsids(blockIds.size(), nsid_);
     int32_t result = loader.batchPut(blockIds.data(), blockAddrs.data(),
                                      nds_offsets.data(), nds_lengths.data(),
                                      nsids.data(), blockIds.size());
-    auto t_batchput_end = std::chrono::steady_clock::now();
-    LOG(INFO) << "[BatchPut] KVStoreObjects NDS batchPut call: "
-              << std::chrono::duration_cast<std::chrono::microseconds>(
-                     t_batchput_end - t_flatten_end).count() << " us";
     if (result != 0) {
         // LOG(ERROR) << "NDS batchPut failed: " << result
         //            << " for " << blockIds.size() << " slices";

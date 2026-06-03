@@ -12,6 +12,8 @@ import tempfile
 import urllib.request
 import urllib.error
 import logging
+import uuid
+import json
 from mooncake.store import MooncakeDistributedStore
 import mooncake.store
 
@@ -176,22 +178,33 @@ def stop_master(master_proc, master_log_file, master_log_path):
     print("    Master stopped")
 
 
-def generate_batch_keys(entity_id, slot_idx, batch_size):
-    return ["t{}_s{}_k{}".format(entity_id, slot_idx, i)
-            for i in range(batch_size)]
+KEYS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nds_test_keys.json")
 
 
-def _remove_slot(store, thread_idx, slot):
-    regex = "^t{}_s{}_k\\d+$".format(thread_idx, slot)
-    try:
-        removed = store.remove_by_regex(regex, force=True)
-        logger.debug("Thread {} removed {} keys from slot {}".format(
-            thread_idx, removed, slot))
-        return removed
-    except Exception as e:
-        logger.warning("Thread {} remove slot {} failed: {}".format(
-            thread_idx, slot, e))
-        return 0
+def generate_random_keys(batch_size):
+    return [uuid.uuid4().hex[:16] for _ in range(batch_size)]
+
+
+def save_keys_to_file(keys):
+    with open(KEYS_FILE, "w") as f:
+        json.dump(keys, f)
+
+
+def load_keys_from_file():
+    with open(KEYS_FILE, "r") as f:
+        return json.load(f)
+
+
+def _remove_keys(store, keys):
+    for key in keys:
+        try:
+            store.remove(key, force=True)
+        except Exception:
+            pass
+
+
+def _remove_slot(store, keys):
+    return _remove_keys(store, keys)
 
 
 class ThreadStats:
@@ -284,7 +297,7 @@ class ThreadStats:
 
 
 def worker_thread(store, thread_idx, operation_mode, block_size, batch_size,
-                   test_duration, thread_stats, core_id, depth,
+                   stop_event, thread_stats, core_id, depth,
                    eviction_window, thread_buf_ptr):
     if core_id >= 0:
         try:
@@ -295,8 +308,13 @@ def worker_thread(store, thread_idx, operation_mode, block_size, batch_size,
                 thread_idx, core_id, e))
 
     num_slots = depth if depth > 0 else 1
-    slot_keys = [generate_batch_keys(thread_idx, s, batch_size)
-                 for s in range(num_slots)]
+
+    if operation_mode == "batch_put" or operation_mode == "mixed":
+        slot_keys = [generate_random_keys(batch_size) for _ in range(num_slots)]
+        save_keys_to_file(slot_keys[0])
+    else:
+        slot_keys = [load_keys_from_file() for _ in range(num_slots)]
+
     alive_slots = {}
     alive_order = []
 
@@ -305,7 +323,7 @@ def worker_thread(store, thread_idx, operation_mode, block_size, batch_size,
         warmup_ptrs = []
         warmup_sizes = []
         for s_idx in range(num_slots):
-            keys = generate_batch_keys(thread_idx, s_idx, batch_size)
+            keys = slot_keys[s_idx]
             warmup_keys.extend(keys)
             for k_idx, _ in enumerate(keys):
                 warmup_ptrs.append(thread_buf_ptr + k_idx * block_size)
@@ -319,18 +337,12 @@ def worker_thread(store, thread_idx, operation_mode, block_size, batch_size,
 
     iteration = 0
     total_batch_bytes = batch_size * block_size
-    deadline = time.time() + test_duration
 
     try:
-        while time.time() < deadline:
+        while not stop_event.is_set():
             try:
-                if depth > 0:
-                    slot = iteration % depth
-                    batch_keys = slot_keys[slot]
-                else:
-                    slot = iteration
-                    batch_keys = generate_batch_keys(
-                        thread_idx, iteration, batch_size)
+                slot = iteration % num_slots
+                batch_keys = slot_keys[slot]
 
                 buffer_ptrs = []
                 sizes = []
@@ -341,7 +353,7 @@ def worker_thread(store, thread_idx, operation_mode, block_size, batch_size,
 
                 if operation_mode == "batch_put":
                     if slot in alive_slots:
-                        _remove_slot(store, thread_idx, slot)
+                        _remove_slot(store, slot_keys[alive_slots[slot]])
                         alive_order.remove(slot)
                         del alive_slots[slot]
 
@@ -370,7 +382,7 @@ def worker_thread(store, thread_idx, operation_mode, block_size, batch_size,
                 if (operation_mode == "batch_put" or operation_mode == "mixed") and eviction_window > 0:
                     while len(alive_slots) > eviction_window:
                         oldest_slot = alive_order[0]
-                        _remove_slot(store, thread_idx, oldest_slot)
+                        _remove_slot(store, slot_keys[oldest_slot])
                         alive_order.pop(0)
                         del alive_slots[oldest_slot]
 
@@ -395,11 +407,7 @@ def worker_thread(store, thread_idx, operation_mode, block_size, batch_size,
                 break
     finally:
         for slot in list(alive_slots.keys()):
-            try:
-                store.remove_by_regex(
-                    "^t{}_s{}_k\\d+$".format(thread_idx, slot), force=True)
-            except Exception:
-                pass
+            _remove_slot(store, slot_keys[slot])
 
 
 def print_final_report(thread_stats, args):
@@ -553,6 +561,7 @@ def run_thread_stress_test(args):
             base_buf_ptr, total_buffer_size))
 
         thread_stats = ThreadStats(num_threads)
+        stop_event = threading.Event()
 
         print(">>> Phase II: Spawn {} threads (shared store)".format(num_threads))
         threads = []
@@ -568,9 +577,8 @@ def run_thread_stress_test(args):
             t = threading.Thread(
                 target=worker_thread,
                 args=(store, i, thread_mode, block_size, batch_size,
-                      test_duration, thread_stats, core_id,
+                      stop_event, thread_stats, core_id,
                       depth, eviction_window, thread_buf_ptr),
-                daemon=True,
             )
             t.start()
             threads.append(t)
@@ -597,11 +605,16 @@ def run_thread_stress_test(args):
                 print("    All threads died, stopping")
                 break
 
-        print("    Test duration reached, waiting for threads to finish...")
-        join_deadline = time.time() + 3
+        print("    Test duration reached, signaling threads to stop...")
+        stop_event.set()
+
+        print("    Waiting for threads to finish...")
         for t in threads:
-            remaining = max(0, join_deadline - time.time())
-            t.join(timeout=remaining)
+            t.join(timeout=10)
+
+        still_alive = sum(1 for t in threads if t.is_alive())
+        if still_alive > 0:
+            print("    {} threads still alive after 10s, proceeding with cleanup".format(still_alive))
 
         print_final_report(thread_stats, args)
 

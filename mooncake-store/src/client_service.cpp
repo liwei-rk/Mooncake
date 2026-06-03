@@ -1230,7 +1230,6 @@ std::vector<PutOperation> Client::CreatePutOperations(
 
 void Client::StartBatchPut(std::vector<PutOperation>& ops,
                            const ReplicateConfig& config) {
-    auto t0 = std::chrono::steady_clock::now();
     std::vector<std::string> keys;
     std::vector<std::vector<uint64_t>> slice_lengths;
 
@@ -1250,12 +1249,7 @@ void Client::StartBatchPut(std::vector<PutOperation>& ops,
 
     auto start_responses =
         master_client_.BatchPutStart(keys, slice_lengths, config);
-    LOG(INFO) << "[StartBatchPut] BatchPutStart RPC: "
-              << std::chrono::duration_cast<std::chrono::microseconds>(
-                     std::chrono::steady_clock::now() - t0).count()
-              << " us for " << keys.size() << " keys";
 
-    // Ensure response size matches request size
     if (start_responses.size() != ops.size()) {
         LOG(ERROR) << "BatchPutStart response size mismatch: expected "
                    << ops.size() << ", got " << start_responses.size();
@@ -1288,16 +1282,12 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
         }
         return;
     }
-    auto t_submit_t0 = std::chrono::steady_clock::now();
 
     // NDS: async batched disk write via write_thread_pool_
     // Submit the entire batch as one StoreObjects call for efficiency.
     // StoreObjects + BatchPutEndDisk/PutRevoke run asynchronously, with
     // per-key TransferFutures in pending_transfers so WaitForTransfers can
     // wait on both NDS disk writes and memory transfers concurrently.
-    LOG(INFO) << "[SubmitTransfers] use_od_=" << use_od_
-              << ", ops.size()=" << ops.size();
-
     if (use_od_) {
         std::vector<std::string> nds_keys;
         std::vector<std::vector<Slice>> nds_slices;
@@ -1330,26 +1320,14 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
             op.pending_transfers.emplace_back(TransferFuture(nds_state));
         }
 
-        LOG(INFO) << "[SubmitTransfers] nds_keys.size()=" << nds_keys.size()
-              << ", nds_slices.size()=" << nds_slices.size()
-              << ", about to enqueue to write_thread_pool_";
-
-        if (!nds_keys.empty()) {
+if (!nds_keys.empty()) {
             write_thread_pool_.enqueue(
                 [this, b_keys = std::move(nds_keys),
                  b_slices = std::move(nds_slices),
                  b_states = std::move(nds_states),
                  b_indices = std::move(nds_op_indices)]() mutable {
-                    LOG(INFO) << "[NDS Lambda] ENTERED, b_keys.size()=" << b_keys.size()
-                              << ", kv_storage_backend_=nullptr?" << (!kv_storage_backend_)
-                              << ", initialized=" << (kv_storage_backend_ ? kv_storage_backend_->isInitialized() : false);
-                    auto t_lambda = std::chrono::steady_clock::now();
                     auto nds_result = kv_storage_backend_->StoreObjects(
                         b_keys, b_slices);
-                    LOG(INFO) << "[NDS Lambda] StoreObjects: "
-                              << std::chrono::duration_cast<std::chrono::microseconds>(
-                                     std::chrono::steady_clock::now() - t_lambda).count()
-                              << " us for " << b_keys.size() << " keys";
                     if (!nds_result) {
                         LOG(ERROR) << "NDS StoreObjects batch failed for "
                                    << b_keys.size() << " keys";
@@ -1364,15 +1342,10 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                             b_states[j]->set_completed(
                                 ErrorCode::FILE_READ_FAIL);
                         }
-                        LOG(INFO) << "[NDS Lambda] fail path (PutRevoke done)";
                         return;
                     }
                     auto end_results =
                         master_client_.BatchPutEndDisk(b_keys);
-                    LOG(INFO) << "[NDS Lambda] BatchPutEndDisk RPC: "
-                              << std::chrono::duration_cast<std::chrono::microseconds>(
-                                     std::chrono::steady_clock::now() - t_lambda).count()
-                              << " us (cumulative) for " << b_keys.size() << " keys";
                     if (end_results.size() != b_keys.size()) {
                         LOG(ERROR)
                             << "BatchPutEndDisk response size mismatch";
@@ -1400,10 +1373,6 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                     }
                 });
         }
-        LOG(INFO) << "[SubmitTransfers] NDS enqueue: "
-                  << std::chrono::duration_cast<std::chrono::microseconds>(
-                         std::chrono::steady_clock::now() - t_submit_t0).count()
-                  << " us, " << nds_keys.size() << " keys queued";
     }
 
     // StorageBackend: per-key async disk write (PutToLocalFile)
