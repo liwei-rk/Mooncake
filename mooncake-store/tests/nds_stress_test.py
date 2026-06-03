@@ -95,6 +95,7 @@ def resolve_master_binary(master_binary_arg=""):
 
 
 def start_master(args):
+    os.environ["MC_TCP_BIND_ADDRESS"] = "127.0.0.1"
     master_binary = resolve_master_binary(args.master_binary)
     rpc_port = find_free_port()
     http_port = find_free_port()

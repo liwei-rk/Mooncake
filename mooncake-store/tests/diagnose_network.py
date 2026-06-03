@@ -89,6 +89,9 @@ def main():
 
     print("Ports: RPC={}, HTTP metadata={}, metrics={}".format(rpc_port, http_port, metrics_port))
 
+    os.environ["MC_TCP_BIND_ADDRESS"] = "127.0.0.1"
+    print("Set MC_TCP_BIND_ADDRESS=127.0.0.1 (force transfer engine RPC to bind localhost)")
+
     log_fd, log_path = tempfile.mkstemp(prefix="diag_master-", suffix=".log")
     os.close(log_fd)
     log_file = open(log_path, "w", encoding="utf-8")
