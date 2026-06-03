@@ -1269,21 +1269,12 @@ void Client::StartBatchPut(std::vector<PutOperation>& ops,
     // Process individual responses with robust error handling
     for (size_t i = 0; i < ops.size(); ++i) {
         if (!start_responses[i]) {
-            LOG(INFO) << "[StartBatchPut] op[" << i << "] key=" << ops[i].key
-                      << " FAILED: " << toString(start_responses[i].error());
             ops[i].SetError(start_responses[i].error(),
                             "Master failed to start put operation");
         } else {
             ops[i].replicas = start_responses[i].value();
-            LOG(INFO) << "[StartBatchPut] op[" << i << "] key=" << ops[i].key
-                      << " OK, replicas=" << ops[i].replicas.size();
-            for (size_t r = 0; r < ops[i].replicas.size(); ++r) {
-                const auto& desc = ops[i].replicas[r];
-                LOG(INFO) << "[StartBatchPut] op[" << i << "] replica[" << r
-                          << "] is_memory=" << desc.is_memory_replica()
-                          << " is_disk=" << desc.is_disk_replica()
-                          << " is_local_disk=" << desc.is_local_disk_replica();
-            }
+            VLOG(1) << "Successfully started put for key " << ops[i].key
+                    << " with " << ops[i].replicas.size() << " replicas";
         }
     }
 }
