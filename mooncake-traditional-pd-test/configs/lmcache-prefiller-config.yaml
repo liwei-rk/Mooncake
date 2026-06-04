@@ -1,0 +1,20 @@
+chunk_size: 256
+local_cpu: True
+max_local_cpu_size: 5
+
+remote_url: "mooncakestore://localhost:50051/"
+remote_serde: "naive"
+save_chunk_meta: false
+
+extra_config:
+  local_hostname: "prefiller-host"
+  metadata_server: "http://localhost:8005/metadata"
+  protocol: "rdma"
+  device_name: ""             # RDMA device name, empty means auto-discover (需配合 MC_MS_AUTO_DISC=1)
+                              # 单设备: "mlx5_0" / "roce_eth0" / "erdma_0" 等
+                              # 多设备: "mlx5_0,mlx5_1" (逗号分隔)
+                              # 也可通过 MOONCAKE_DEVICE 环境变量设置
+  master_server_address: "localhost:50051"
+  global_segment_size: 32212254720    # 30GB — 传统模式: Master 为 Client 分配全局内存段
+  local_buffer_size: 1073741824       # 1GB  — 传统模式: Client 本地缓冲区 (NDS 模式必须为 0, 传统模式必须 > 0)
+  transfer_timeout: 5

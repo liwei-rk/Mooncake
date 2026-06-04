@@ -1,0 +1,10 @@
+[submodule "vllm-ascend"]
+	path = vllm-ascend
+	url = https://github.com/vllm-project/vllm-ascend.git
+[submodule "lmcache-private"]
+	path = lmcache-private
+	url = https://github.com/lisiG9/lmcache-private.git
+[submodule "Mooncake"]
+	path = Mooncake
+	url = https://github.com/liwei-rk/Mooncake.git
+	branch = kv_v7
