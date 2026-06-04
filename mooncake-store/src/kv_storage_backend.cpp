@@ -9,7 +9,7 @@ namespace mooncake {
 
 namespace {
 
-typedef int32_t (*NDS_init_fn)(void*, uint64_t);
+typedef int32_t (*NDS_init_fn)(void*, uint64_t, const char*);
 typedef int32_t (*NDS_isExists_fn)(const uint64_t*, size_t);
 typedef int32_t (*NDS_get_fn)(uint64_t, uint8_t*, size_t, size_t, uint32_t);
 typedef int32_t (*NDS_put_fn)(uint64_t, uint8_t*, size_t, size_t, uint32_t);
@@ -29,6 +29,7 @@ struct NDSLoader {
     bool nds_initialized = false;
     void* nds_mem_addr = nullptr;
     uint64_t nds_mem_size = 0;
+    std::string nds_config_path;
 
     static NDSLoader& Instance() {
         static NDSLoader instance;
@@ -41,6 +42,9 @@ struct NDSLoader {
         const char* env_path = std::getenv("NDS_LIBRARY_PATH");
         std::string lib_path = env_path ? env_path : "libndskv.so";
 
+        const char* env_config = std::getenv("MC_NDS_CONFIG");
+        nds_config_path = env_config ? env_config : "nds_config.conf";
+
         handle = dlopen(lib_path.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (!handle) {
             LOG(ERROR) << "Failed to load " << lib_path << ": " << dlerror();
@@ -48,34 +52,34 @@ struct NDSLoader {
         }
 
         dlerror();
-        init = (NDS_init_fn)dlsym(handle, "init");
+        init = (NDS_init_fn)dlsym(handle, "c_init");
         const char* dlsym_error = dlerror();
-        if (dlsym_error) { LOG(ERROR) << "dlsym 'init' failed: " << dlsym_error; }
+        if (dlsym_error) { LOG(ERROR) << "dlsym 'c_init' failed: " << dlsym_error; }
 
         dlerror();
-        isExists = (NDS_isExists_fn)dlsym(handle, "isExists");
+        isExists = (NDS_isExists_fn)dlsym(handle, "c_isExists");
         dlsym_error = dlerror();
-        if (dlsym_error) { LOG(ERROR) << "dlsym 'isExists' failed: " << dlsym_error; }
+        if (dlsym_error) { LOG(ERROR) << "dlsym 'c_isExists' failed: " << dlsym_error; }
 
         dlerror();
-        get = (NDS_get_fn)dlsym(handle, "get");
+        get = (NDS_get_fn)dlsym(handle, "c_get");
         dlsym_error = dlerror();
-        if (dlsym_error) { LOG(ERROR) << "dlsym 'get' failed: " << dlsym_error; }
+        if (dlsym_error) { LOG(ERROR) << "dlsym 'c_get' failed: " << dlsym_error; }
 
         dlerror();
-        put = (NDS_put_fn)dlsym(handle, "put");
+        put = (NDS_put_fn)dlsym(handle, "c_put");
         dlsym_error = dlerror();
-        if (dlsym_error) { LOG(ERROR) << "dlsym 'put' failed: " << dlsym_error; }
+        if (dlsym_error) { LOG(ERROR) << "dlsym 'c_put' failed: " << dlsym_error; }
 
         dlerror();
-        batchGet = (NDS_batchGet_fn)dlsym(handle, "batchGet");
+        batchGet = (NDS_batchGet_fn)dlsym(handle, "c_batchGet");
         dlsym_error = dlerror();
-        if (dlsym_error) { LOG(ERROR) << "dlsym 'batchGet' failed: " << dlsym_error; }
+        if (dlsym_error) { LOG(ERROR) << "dlsym 'c_batchGet' failed: " << dlsym_error; }
 
         dlerror();
-        batchPut = (NDS_batchPut_fn)dlsym(handle, "batchPut");
+        batchPut = (NDS_batchPut_fn)dlsym(handle, "c_batchPut");
         dlsym_error = dlerror();
-        if (dlsym_error) { LOG(ERROR) << "dlsym 'batchPut' failed: " << dlsym_error; }
+        if (dlsym_error) { LOG(ERROR) << "dlsym 'c_batchPut' failed: " << dlsym_error; }
 
         if (!init || !get || !put || !batchGet || !batchPut) {
             LOG(ERROR) << "Failed to load required NDS functions"
@@ -127,7 +131,7 @@ tl::expected<void, ErrorCode> KVStorageBackend::Init(void* nds_mem_addr,
         if (nds_mem_addr && nds_mem_size > 0) {
             nds_mem_addr_ = nds_mem_addr;
             nds_mem_size_ = nds_mem_size;
-            int32_t result = loader.init(nds_mem_addr_, nds_mem_size_);
+            int32_t result = loader.init(nds_mem_addr_, nds_mem_size_, loader.nds_config_path.c_str());
             if (result != 0) {
                 LOG(ERROR) << "Failed to initialize NDS KV storage with external memory: " << result;
                 return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
@@ -153,7 +157,7 @@ tl::expected<void, ErrorCode> KVStorageBackend::Init(void* nds_mem_addr,
                 return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
             }
 
-            int32_t result = loader.init(nds_mem_addr_, nds_mem_size_);
+            int32_t result = loader.init(nds_mem_addr_, nds_mem_size_, loader.nds_config_path.c_str());
             if (result != 0) {
                 LOG(ERROR) << "Failed to initialize NDS KV storage: " << result;
                 free(nds_mem_addr_);

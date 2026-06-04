@@ -668,6 +668,8 @@ BatchGet (use_od_=true):
 
 **NDSLoader typedefs 对应更新：**
 ```cpp
+typedef int32_t (*NDS_init_fn)(void*, uint64_t, const char*);
+typedef int32_t (*NDS_isExists_fn)(const uint64_t*, size_t);
 typedef int32_t (*NDS_get_fn)(uint64_t, uint8_t*, size_t, size_t, uint32_t);
 typedef int32_t (*NDS_put_fn)(uint64_t, uint8_t*, size_t, size_t, uint32_t);
 typedef int32_t (*NDS_batchGet_fn)(const uint64_t*, uint8_t**, const size_t*,
@@ -675,6 +677,22 @@ typedef int32_t (*NDS_batchGet_fn)(const uint64_t*, uint8_t**, const size_t*,
 typedef int32_t (*NDS_batchPut_fn)(const uint64_t*, uint8_t**, const size_t*,
                                    const size_t*, const uint32_t*, uint32_t);
 ```
+
+**NDSLoader 结构体新增字段：**
+```cpp
+struct NDSLoader {
+    // ... 原有字段 ...
+    std::string nds_config_path;  // NDS 配置文件路径（从 MC_NDS_CONFIG 读取）
+};
+```
+
+**NDSLoader::Load() 变更：**
+- 新增 `MC_NDS_CONFIG` 环境变量读取：未设置时默认为 `"nds_config.conf"`（当前执行目录）
+- 所有 `dlsym` 改用 `c_*` C-linkage 符号名（`c_init/c_get/c_put/c_batchGet/c_batchPut/c_isExists`），匹配 `extern "C"` 导出符号
+
+**loader.init() 调用变更：**
+- 两处 `loader.init(nds_mem_addr_, nds_mem_size_)` → `loader.init(nds_mem_addr_, nds_mem_size_, loader.nds_config_path.c_str())`
+- 新增第三参数 `const char* path_nds_config`，将配置文件路径传入 NDS C API
 
 **nsid 传递机制（Master 侧配置 → RPC 下发 → Client 使用）：**
 
@@ -830,6 +848,7 @@ struct NDSLoader {
 | NDS init 由 RegisterLocalMemory 触发 | 零拷贝要求源数据地址在 NDS 内存区域内；register_buffer 时才知道可用内存 |
 | 不使用单独 InitNDS 方法 | 用户明确要求复用 `Init(void*, uint64_t)` 签名 |
 | NDSLoader 全局单例 | NDS C API 全是全局状态操作，不支持多实例 |
+| nds_config_path 存储在 NDSLoader 单例中 | NDS init 只调用一次，配置文件路径是进程级配置；通过 MC_NDS_CONFIG 环境变量传入，默认 nds_config.conf |
 | nsid 存储在 KVStorageBackend 中 | NDSLoader 是全局单例无法存储 per-client 状态；KVStorageBackend 与 Client 1:1 绑定，StoreObjects/LoadObjects 内部自动填充 nsids |
 | nsid 由 Master 配置并通过 RPC 下发 | nsid 是部署级配置，不暴露给上层 API 或环境变量；Master gflag → MasterConfig → RPC → Client.nsid_ → KVStorageBackend.setNsid() |
 | use_od=true + nsid=0 静默降级 | 不 exit/fatal，自动禁用 DISK replica 并 LOG(WARNING)；双重校验（main() + MasterService 构造函数） |
@@ -859,10 +878,14 @@ Python: store.setup(use_od=True)
   └─ Python: store.register_buffer(ptr, size)
        ├─ Client::RegisterLocalMemory(ptr, size, ...)
        │    ├─ use_od_=true && kv_storage_backend_ && !isInitialized()
-       │    │    ├─ KVStorageBackend::Init(ptr, size)
-       │    │    │    ├─ NDSLoader::Load() → dlopen("libndskv.so")
-       │    │    │    ├─ NDSLoader::init(ptr, size) → NDS C API init
-       │    │    │    └─ initialized_ = true
+│    │    ├─ KVStorageBackend::Init(ptr, size)
+        │    │    │    ├─ NDSLoader::Load()
+        │    │    │    │    ├─ dlopen("libndskv.so")
+        │    │    │    │    ├─ dlsym c_init/c_get/c_put/c_batchGet/c_batchPut/c_isExists
+        │    │    │    │    ├─ MC_NDS_CONFIG env → nds_config_path（默认 nds_config.conf）
+        │    │    │    │    └─
+        │    │    │    ├─ NDSLoader::init(ptr, size, nds_config_path.c_str()) → NDS C API c_init
+        │    │    │    └─ initialized_ = true
        │    │    │
        │    │    └─ use_od_=false / 已初始化 → 正常注册内存
 ```
@@ -1399,6 +1422,10 @@ python nds_data_correctness_test.py \
 - 移除 `ndsclient` 库链接依赖（不再需要静态编译的 mock 库）
 - NDS 通过 `dlopen("libndskv.so")` 动态加载，运行时依赖
 - `NDS_LIBRARY_PATH` 环境变量可指定 so 路径
+- `MC_NDS_CONFIG` 环境变量可指定 NDS 配置文件路径（含文件名），默认当前执行目录的 `nds_config.conf`
+- `dlsym` 改用 `c_*` C-linkage 符号名（`c_init/c_get/c_put/c_batchGet/c_batchPut/c_isExists`）
 - CMake 新增 `kv_storage_backend.cpp` 源文件
 - CMake 新增 `nds_client_test` 测试目标
 - `MC_NDS_NSID` 环境变量已完全移除，nsid 通过 Master gflag `--nsid` 配置
+- `c_init` 签名变更：新增 `const char *path_nds_config` 第三参数，`NDS_init_fn` typedef 同步更新
+- `nds_interface.h` 移除孤立的 `#endif`（`#pragma once` 已足够）
