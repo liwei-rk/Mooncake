@@ -6,6 +6,360 @@
 
 ---
 
+## 〇、架构对比
+
+### 〇.1 原始架构（kv-main）
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          Master (mooncake_master)                       │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │ MasterService                                                     │  │
+│  │  • use_disk_replica_ ─── 由 MountLocalDiskSegment 触发            │  │
+│  │  • root_fs_dir_ ──────── 共享文件系统路径（如 3FS）               │  │
+│  │  • enable_disk_eviction_ ── 磁盘淘汰开关                          │  │
+│  │  • quota_bytes_ ──────── 磁盘配额                                 │  │
+│  │                                                                   │  │
+│  │  RPC 方法：                                                        │  │
+│  │  ├─ PutStart → 分配 replica（MEMORY / DISK / LOCAL_DISK）         │  │
+│  │  ├─ PutEnd(key, MEMORY) → 完成 MEMORY replica                    │  │
+│  │  ├─ BatchPutEnd(keys, MEMORY) → 批量完成                          │  │
+│  │  ├─ BatchPutRevoke(keys, MEMORY) → 批量撤销（仅 MEMORY）          │  │
+│  │  ├─ GetReplicaList → 返回 replica 描述符列表                      │  │
+│  │  ├─ GetStorageConfig → {fsdir, enable_disk_eviction, quota_bytes} │  │
+│  │  ├─ MountLocalDiskSegment → 注册本地磁盘                          │  │
+│  │  └─ OffloadObjectHeartbeat → 返回待卸载对象列表                   │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                 │                                       │
+│                    RPC (easyrpc/brpc)                                    │
+│                                 │                                       │
+└─────────────────────────────────┼───────────────────────────────────────┘
+                                  │
+                                  │
+┌─────────────────────────────────┼───────────────────────────────────────┐
+│                          Client  │                                       │
+│  ┌──────────────────────────────┼────────────────────────────────────┐  │
+│  │ MasterClient ────────────────┘                                    │  │
+│  │  • RPC 通信代理                                                   │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │ Client 核心成员                                                   │  │
+│  │  • storage_backend_ ────── shared_ptr<StorageBackend>             │  │
+│  │  • transfer_engine_ ────── shared_ptr<TransferEngine>             │  │
+│  │  • transfer_submitter_ ─── unique_ptr<TransferSubmitter>          │  │
+│  │  • hot_cache_ ──────────── shared_ptr<LocalHotCache>              │  │
+│  │  • write_thread_pool_ ──── ThreadPool（异步磁盘写入）              │  │
+│  │  • master_client_ ──────── MasterClient                          │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  ┌─────────────────── 数据写入路径（Put）──────────────────────────┐   │
+│  │                                                                   │   │
+│  │  BatchPutStart RPC → 分配 replicas                               │   │
+│  │                                                                   │   │
+│  │  DISK replica:                                                    │   │
+│  │    PutToLocalFile(key, slices, disk_descriptor)                  │   │
+│  │      → write_thread_pool_.enqueue:                               │   │
+│  │          StorageBackend::StoreObject(path, value, key)           │   │
+│  │            → splice slices to string → 异步写文件                 │   │
+│  │          成功 → PutEnd(key, DISK)                                │   │
+│  │          失败 → PutRevoke(key, DISK)                             │   │
+│  │                                                                   │   │
+│  │  MEMORY replica:                                                  │   │
+│  │    TransferWrite(replica, slices)                                │   │
+│  │      → TransferSubmitter::submit → TransferEngine batch          │   │
+│  │                                                                   │   │
+│  │  FinalizeBatchPut:                                                │   │
+│  │    BatchPutEnd(keys, MEMORY) ← 只结束 MEMORY replica             │   │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  ┌─────────────────── 数据读取路径（Get）──────────────────────────┐   │
+│  │                                                                   │   │
+│  │  FindFirstCompleteReplica → 选择 replica 类型                     │   │
+│  │                                                                   │   │
+│  │  MEMORY replica:                                                  │   │
+│  │    TransferSubmitter::submit → selectStrategy:                   │   │
+│  │      LOCAL_MEMCPY ──── 同节点 → MemcpyWorkerPool (1 thread)     │   │
+│  │      TRANSFER_ENGINE ── 跨节点 → TransferEngine RDMA/TCP        │   │
+│  │                                                                   │   │
+│  │  DISK replica:                                                    │   │
+│  │    TransferSubmitter::submitFileReadOperation:                   │   │
+│  │      FilereadTask{file_path, object_size, slices}                │   │
+│  │      FilereadWorkerPool(10 threads):                             │   │
+│  │        StorageBackend::LoadObject(path, slices, size)            │   │
+│  │          → preadv 直接读入 user buffer（零拷贝）                  │   │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  ┌─────────────── HotCache（频率准入缓存）─────────────────────────┐   │
+│  │  CountMinSketch + admission_threshold_                           │   │
+│  │  → 高频访问 key 自动缓存到本地 hot cache                         │   │
+│  │  → RedirectToHotCache → 直接 memcpy，不走 TransferEngine         │   │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  ┌─────────────── Remove / RemoveByRegex / RemoveAll ──────────────┐   │
+│  │  ← 被注释掉，只删 master 元数据，不删本地文件                    │   │
+│  │  // if (storage_backend_) storage_backend_->RemoveFile(key);     │   │
+│  └───────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────── StorageBackend（文件系统持久化）──────────────────┐
+  │                                                                   │
+  │  三种实现：                                                        │
+  │  ├─ FilePerKey ────── 一个 key 一个文件（最简单）                  │
+  │  ├─ Bucket ────────── 多 key 打包到一个 .bucket 文件              │
+  │  └─ OffsetAllocator ─ 单文件 + offset 分配器                     │
+  │                                                                   │
+  │  核心方法：                                                        │
+  │  ├─ StoreObject(path, slices/value, key) → 写文件                │
+  │  ├─ LoadObject(path, slices, size) → preadv 读文件               │
+  │  ├─ EnsureDiskSpace(required) → FIFO/LRU 淘汰                    │
+  │  └─ RemoveFile / RemoveByRegex / RemoveAll → 删除文件            │
+  └───────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────── 关键特征 ──────────────────────────────────────────┐
+  │                                                                   │
+  │  1. DISK replica → 共享文件系统路径（3FS/NFS）                    │
+  │     file_path = root_fs_dir/cluster_id/hash(key)                 │
+  │                                                                   │
+  │  2. 磁盘写入 = 异步文件写入（1份拷贝：splice → string）           │
+  │     磁盘读取 = preadv 直接到 user buffer（0份拷贝）               │
+  │                                                                   │
+  │  3. use_disk_replica_ 由 MountLocalDiskSegment 触发              │
+  │     root_fs_dir_ 必须非空才能分配 DISK replica                    │
+  │                                                                   │
+  │  4. BatchPutRevoke 只撤销 MEMORY replica                         │
+  │     DISK replica 无对应批量撤销接口                               │
+  │                                                                   │
+  │  5. 本地清理（Remove/RemoveByRegex/RemoveAll）被注释掉            │
+  │                                                                   │
+  │  6. GetStorageConfig 只返回 3 个字段：                            │
+  │     {fsdir, enable_disk_eviction, quota_bytes}                    │
+  │     ← 无 use_od, 无 nsid                                         │
+  └───────────────────────────────────────────────────────────────────┘
+```
+
+### 〇.2 NDS 适配架构（kv_v6）
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     Master (mooncake_master --use_od=true --nsid=1)     │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │ MasterService                                                     │  │
+│  │  • use_od_ ───────────── const bool（从 MasterConfig 传入）       │  │
+│  │  • nsid_ ─────────────── const uint32_t（从 MasterConfig 传入）   │  │
+│  │  • use_disk_replica_ ─── use_od_=true && nsid_>0 时启用          │  │
+│  │  • root_fs_dir_ ──────── 可为空（NDS 场景不需要文件路径）        │  │
+│  │  • enable_disk_eviction_                                        │  │
+│  │  • quota_bytes_                                                │  │
+│  │                                                                   │  │
+│  │  验证：use_od_=true && nsid_=0                                   │  │
+│  │    → 静默降级：use_disk_replica_=false + LOG(WARNING)            │  │
+│  │                                                                   │  │
+│  │  RPC 方法：                                                        │  │
+│  │  ├─ PutStart → MEMORY + DISK replica（root_fs_dir 为空时         │  │
+│  │  │   file_path=""，NDS 场景不需要文件路径）                      │  │
+│  │  ├─ PutEnd(key, DISK) ──── 新增单键 DISK 完成                   │  │
+│  │  ├─ BatchPutEnd(keys, MEMORY) ─── 原有批量 MEMORY 完成           │  │
+│  │  ├─ BatchPutEndDisk(keys) ──────── 新增批量 DISK 完成            │  │
+│  │  ├─ BatchPutRevoke(keys) ──────── 撤销 MEMORY+DISK（任一成功=OK）│  │
+│  │  ├─ GetStorageConfig → {fsdir, eviction, quota, use_od, nsid}   │  │
+│  │  └────────── ↑ 新增 use_od + nsid 字段                           │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                 │                                       │
+│                    RPC (easyrpc/brpc)                                    │
+│                                 │                                       │
+└─────────────────────────────────┼───────────────────────────────────────┘
+                                  │
+                                  │
+┌─────────────────────────────────┼───────────────────────────────────────┐
+│                          Client  │                                       │
+│  ┌──────────────────────────────┼────────────────────────────────────┐  │
+│  │ MasterClient ────────────────┘                                    │  │
+│  │  • RPC 通信代理                                                   │  │
+│  │  • 新增 BatchPutEndDisk(keys) 方法                                │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │ Client 核心成员                                                   │  │
+│  │  • storage_backend_ ────── shared_ptr<StorageBackend>             │  │
+│  │  • kv_storage_backend_ ─── shared_ptr<KVStorageBackend> ← 新增   │  │
+│  │  • use_od_ ────────────── bool ← 从 GetStorageConfig RPC 获取    │  │
+│  │  • nsid_ ──────────────── uint32_t ← 从 GetStorageConfig RPC 获取│  │
+│  │  • transfer_engine_                                     │  │
+│  │  • transfer_submitter_ ─── 新增 kv_backend + use_od 参数         │  │
+│  │  • hot_cache_                                           │  │
+│  │  • write_thread_pool_                                    │  │
+│  │  • master_client_                                       │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  ┌─────────────── use_od_ 双后端路由 ──────────────────────────────┐   │
+│  │                                                                   │   │
+│  │  操作                │ use_od_=true       │ use_od_=false         │   │
+│  │  ────────────────────┼────────────────────┼────────────────────── │   │
+│  │  磁盘后端创建         │ KVStorageBackend   │ StorageBackend        │   │
+│  │  HasDiskStorage()     │ kv_backend_!=null  │ storage_!=null       │   │
+│  │  Put DISK replica     │ StoreObjects       │ PutToLocalFile       │   │
+│  │  BatchPut DISK        │ 整批异步 StoreObj  │ 逐key PutToLocalFile │   │
+│  │  Get DISK replica     │ LoadObjects(NDS)   │ LoadObject(文件)     │   │
+│  │  Remove              │ kv_backend_->Remove │ storage_->RemoveFile │   │
+│  │  RemoveByRegex        │ kv_backend_->RmReg │ storage_->RmRegex   │   │
+│  │  RemoveAll           │ kv_backend_->RmAll │ storage_->RemoveAll  │   │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  ┌─────── NDS 数据写入路径（Put, use_od_=true）────────────────────┐   │
+│  │                                                                   │   │
+│  │  BatchPutStart RPC → 分配 replicas                               │   │
+│  │                                                                   │   │
+│  │  DISK replica:                                                    │   │
+│  │    收集所有 disk key → 整批提交：                                  │   │
+│  │    write_thread_pool_.enqueue:                                    │   │
+│  │      KVStorageBackend::StoreObjects(keys, slices)                │   │
+│  │        → contiguous 校验 → NDSLoader::batchPut(blockIds,         │   │
+│  │          addrs, offsets, lengths, nsids, count) ← 零拷贝         │   │
+│  │      成功 → BatchPutEndDisk(keys) RPC                            │   │
+│  │      失败 → PutRevoke(key, DISK) per key                         │   │
+│  │    每个 key 挂 MemcpyOperationState future                        │   │
+│  │                                                                   │   │
+│  │  MEMORY replica:                                                  │   │
+│  │    TransferWrite(replica, slices) ← 同原始架构                    │   │
+│  │                                                                   │   │
+│  │  FinalizeBatchPut:                                                │   │
+│  │    BatchPutEnd(keys, MEMORY) ← 只结束 MEMORY                     │   │
+│  │    BatchPutRevoke(keys) ← 撤销 MEMORY+DISK                       │   │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  ┌─────── NDS 数据读取路径（Get, use_od_=true）────────────────────┐   │
+│  │                                                                   │   │
+│  │  BatchGet (use_od_=true):                                         │   │
+│  │    逐key查找replica → 收集 batch_replicas                        │   │
+│  │    submit_batch(batch_replicas, batch_slices, READ)              │   │
+│  │      → replicas[0].is_disk_replica() && use_od_                  │   │
+│  │        → submitBatchFileReadOperation:                           │   │
+│  │          BatchFilereadTask{nds_keys, batched_slices, state}       │   │
+│  │          FilereadWorkerPool → KVStorageBackend::LoadObjects      │   │
+│  │            → NDSLoader::batchGet(blockIds, addrs, offsets,       │   │
+│  │              lengths, nsids, count) ← 零拷贝整批读取              │   │
+│  │        → 否则 → 原有 LOCAL_MEMCPY / TRANSFER_ENGINE              │   │
+│  │    future->get() ← 阻塞等待整批完成                               │   │
+│  │                                                                   │   │
+│  │  BatchGet (use_od_=false):                                        │   │
+│  │    ← 同原始架构（逐key submit + 逐key future.get）               │   │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  ┌─────── NDS 初始化/释放（use_od_=true）──────────────────────────┐   │
+│  │                                                                   │   │
+│  │  Client::Create:                                                  │   │
+│  │    GetStorageConfig → use_od_=true, nsid_=1                      │   │
+│  │    PrepareStorageBackend → 创建 KVStorageBackend（不调 Init）    │   │
+│  │      kv_storage_backend_->setNsid(nsid_) ← 从 master config 设置 │   │
+│  │                                                                   │   │
+│  │  RegisterLocalMemory(addr, length):                              │   │
+│  │    use_od_ && kv_storage_backend_ && !isInitialized()            │   │
+│  │      → KVStorageBackend::Init(addr, length) ← 延迟初始化         │   │
+│  │        → NDSLoader::Load() → dlopen("libndskv.so")              │   │
+│  │        → NDSLoader::init(addr, length) → NDS C API              │   │
+│  │                                                                   │   │
+│  │  unregisterLocalMemory(addr):                                    │   │
+│  │    use_od_ && kv_storage_backend_ && isInitialized()             │   │
+│  │      → KVStorageBackend::CleanupNDS()                            │   │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  ┌─────── Remove / RemoveByRegex / RemoveAll（重新启用）────────────┐   │
+│  │  if (use_od_)                                                    │   │
+│  │    kv_storage_backend_->Remove(key) ← NDS 不支持删除，空操作     │   │
+│  │  else                                                            │   │
+│  │    storage_backend_->RemoveFile(key) ← 文件系统本地删除          │   │
+│  │  （原始架构中被注释掉，NDS 适配重新启用）                         │   │
+│  └───────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────── KVStorageBackend（NDS 持久化，use_od_=true）──────┐
+  │                                                                   │
+  │  NDSLoader（全局单例，dlopen 动态加载）：                          │
+  │    dlopen("libndskv.so") → dlsym(init/get/put/batchGet/batchPut) │
+  │    NDS_LIBRARY_PATH 环境变量指定 so 路径                          │
+  │                                                                   │
+  │  核心方法：                                                        │
+  │  ├─ Init(addr, length)                                            │
+  │  │    有外部内存 → 用 register_buffer 提供的地址                   │
+  │  │    无外部内存 → aligned_alloc(4096, 1GB) 自分配                │
+  │  ├─ StoreObjects(keys, batched_slices)                            │
+  │  │    → contiguous 校验 → 合并为单个 NDS entry                    │
+  │  │    → NDSLoader::batchPut(blockIds, addrs, offsets,             │
+  │  │       lengths, nsids(count, nsid_), count) ← 零拷贝写入       │
+  │  ├─ LoadObjects(keys, batched_slices)                             │
+  │  │    → contiguous 校验 → 合并为单个 NDS entry                    │
+  │  │    → NDSLoader::batchGet(blockIds, addrs, offsets,             │
+  │  │       lengths, nsids(count, nsid_), count) ← 零拷贝读取       │
+  │  ├─ Remove / RemoveByRegex / RemoveAll                            │
+  │  │    → NDS 不支持删除，空操作                                    │
+  │  └─ CleanupNDS()                                                  │
+  │       → free(owns_nds_memory_) + 重置全局状态                     │
+  │                                                                   │
+  │  nsid 传递：                                                      │
+  │    setNsid(nsid_) ← 从 Client.nsid_ 设置（master config 下发）   │
+  │    每次 batchPut/batchGet 自动填充 nsids(count, nsid_)           │
+  └───────────────────────────────────────────────────────────────────┘
+
+  ┌─────── TransferSubmitter（扩展版）────────────────────────────────┐
+  │                                                                   │
+  │  构造函数新增参数：kv_backend, use_od                              │
+  │                                                                   │
+  │  新增方法：                                                        │
+  │  ├─ submitBatchMemcpyOperation ──── 批量 memcpy（BatchGet 优化） │
+  │  ├─ submitBatchFileReadOperation ── 批量 NDS 读取                 │
+  │                                                                   │
+  │  FilereadTask 扩展：                                              │
+  │    use_nds=true → nds_key + slices → kv_backend_->LoadObjects    │
+  │    use_nds=false → file_path + size → backend_->LoadObject       │
+  │                                                                   │
+  │  BatchFilereadTask（新增）：                                       │
+  │    nds_keys + batched_slices + state                              │
+  │    → kv_backend_->LoadObjects(nds_keys, batched_slices)          │
+  │                                                                   │
+  │  FilereadWorkerPool：                                             │
+  │    队列类型改为 variant<FilereadTask, BatchFilereadTask>          │
+  │    新增 kv_backend_ 成员                                           │
+  │                                                                   │
+  │  MemcpyWorkerPool：                                               │
+  │    1 thread → 4 threads（MC_MEMCPY_WORKERS 可配置 1~64）         │
+  │                                                                   │
+  │  TransferFuture：                                                 │
+  │    不可拷贝 → 可拷贝（支持 NDS batch future 管理）                │
+  └───────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────── 关键特征对比 ──────────────────────────────────────┐
+  │                                                                   │
+  │  kv-main                          │ kv_v6 (NDS 适配)              │
+  │  ─────────────────────────────────┼────────────────────────────── │
+  │  DISK replica → 共享文件系统      │ DISK replica → NDS KV 存储   │
+  │  file_path = root_fs_dir/...      │ file_path = ""（NDS 不需要） │
+  │                                   │ 或 key 直接映射为 uint64      │
+  │  磁盘写入 = 文件异步写入（1拷贝） │ 磁盘写入 = NDS batchPut      │
+  │                                   │   零拷贝（contiguous 校验）  │
+  │  磁盘读取 = preadv 文件（0拷贝）  │ 磁盘读取 = NDS batchGet      │
+  │                                   │   零拷贝（contiguous 校验）  │
+  │  BatchPutRevoke 只撤销 MEMORY     │ BatchPutRevoke 撤销          │
+  │                                   │   MEMORY+DISK               │
+  │  本地清理被注释掉                 │ 重新启用（use_od_ 双路由）   │
+  │  GetStorageConfig 返回 3 字段     │ 返回 5 字段                  │
+  │  {fsdir, eviction, quota}         │ {fsdir, eviction, quota,     │
+  │                                   │  use_od, nsid}              │
+  │  无 use_od / nsid 配置            │ Master gflag 配置            │
+  │                                   │ --use_od + --nsid            │
+  │  NDS init 在 Create 时            │ NDS init 延迟到              │
+  │  （需传 nds_mem_addr/size）        │ RegisterLocalMemory 触发    │
+  │                                   │ （复用 register_buffer 内存）│
+  │  nsid 通过 MC_NDS_NSID 环境变量   │ nsid 通过 Master RPC 下发   │
+  │                                   │ （MC_NDS_NSID 已移除）      │
+  │  use_disk_replica_ 由             │ use_disk_replica_ 由         │
+  │  MountLocalDiskSegment 触发       │ use_od_ && nsid_>0 自动启用 │
+  │  root_fs_dir 必须非空             │ root_fs_dir 可为空           │
+  └───────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 一、新增文件
 
 | 文件路径 | 说明 |
