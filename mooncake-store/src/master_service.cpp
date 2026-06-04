@@ -54,6 +54,7 @@ MasterService::MasterService(const MasterServiceConfig& config)
       enable_disk_eviction_(config.enable_disk_eviction),
       quota_bytes_(config.quota_bytes),
       use_od_(config.use_od),
+      nsid_(config.nsid),
       segment_manager_(config.memory_allocator, config.enable_cxl),
       memory_allocator_type_(config.memory_allocator),
       allocation_strategy_(
@@ -137,7 +138,12 @@ MasterService::MasterService(const MasterServiceConfig& config)
             global_file_segment_size_);
     }
     if (use_od_) {
-        use_disk_replica_ = true;
+        if (nsid_ == 0) {
+            LOG(WARNING) << "use_od=true but nsid=0. "
+                            "Disk replica is disabled.";
+        } else {
+            use_disk_replica_ = true;
+        }
     }
 
     if (enable_snapshot_) {
@@ -1629,11 +1635,11 @@ MasterService::GetStorageConfig() const {
             << "Storage root directory or cluster ID is not set. persisting "
                "data is disabled.";
         return GetStorageConfigResponse("", enable_disk_eviction_,
-                                        quota_bytes_, use_od_);
+                                        quota_bytes_, use_od_, nsid_);
     }
     std::string fsdir = root_fs_dir_ + "/" + cluster_id_;
     return GetStorageConfigResponse(fsdir, enable_disk_eviction_, quota_bytes_,
-                                    use_od_);
+                                    use_od_, nsid_);
 }
 
 auto MasterService::MountLocalDiskSegment(const UUID& client_id,

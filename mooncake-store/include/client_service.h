@@ -627,6 +627,7 @@ void PrepareStorageBackend(const std::string& storage_root_dir,
     std::shared_ptr<StorageBackend> storage_backend_;
     std::shared_ptr<KVStorageBackend> kv_storage_backend_;
     bool use_od_{false};
+    uint32_t nsid_{0};
     
     
 

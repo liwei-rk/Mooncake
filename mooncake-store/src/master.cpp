@@ -152,6 +152,8 @@ DEFINE_uint64(
     "Quota for storage backend in bytes (0 = use default 90% of capacity)");
 DEFINE_bool(use_od, false,
             "Use OD (KV) storage backend instead of file-based storage");
+DEFINE_uint32(nsid, 0,
+              "NDS namespace ID (required when use_od=true, 0=disabled)");
 
 // Snapshot related configuration flags (migrated from global_flags)
 DEFINE_string(snapshot_backup_dir, "",
@@ -292,6 +294,7 @@ void InitMasterConf(const mooncake::DefaultConfig& default_config,
     default_config.GetUInt64("quota_bytes", &master_config.quota_bytes,
                              FLAGS_quota_bytes);
     default_config.GetBool("use_od", &master_config.use_od, FLAGS_use_od);
+    default_config.GetUInt32("nsid", &master_config.nsid, FLAGS_nsid);
 
     default_config.GetString("snapshot_backup_dir",
                              &master_config.snapshot_backup_dir,
@@ -553,6 +556,11 @@ void LoadConfigFromCmdline(mooncake::MasterConfig& master_config,
         !conf_set) {
         master_config.use_od = FLAGS_use_od;
     }
+    if ((google::GetCommandLineFlagInfo("nsid", &info) &&
+         !info.is_default) ||
+        !conf_set) {
+        master_config.nsid = FLAGS_nsid;
+    }
     if ((google::GetCommandLineFlagInfo("max_total_finished_tasks", &info) &&
          !info.is_default) ||
         !conf_set) {
@@ -769,7 +777,14 @@ int main(int argc, char* argv[]) {
         << ", enable_cxl=" << master_config.enable_cxl
         << ", cxl_path=" << master_config.cxl_path
         << ", cxl_size=" << master_config.cxl_size
-        << ", use_od=" << master_config.use_od;
+        << ", use_od=" << master_config.use_od
+        << ", nsid=" << master_config.nsid;
+
+    if (master_config.use_od && master_config.nsid == 0) {
+        LOG(WARNING) << "use_od=true requires nsid > 0. "
+                        "Disk replica is disabled.";
+        master_config.use_od = false;
+    }
 
     // Start HTTP metadata server if enabled
     std::unique_ptr<mooncake::HttpMetadataServer> http_metadata_server;

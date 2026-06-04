@@ -1041,6 +1041,7 @@ class MasterService {
     const bool enable_disk_eviction_;
     const uint64_t quota_bytes_;
     const bool use_od_;
+    const uint32_t nsid_;
 
     bool use_disk_replica_{false};
 

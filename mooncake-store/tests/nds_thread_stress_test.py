@@ -105,6 +105,7 @@ def start_master(args):
     cmd = [
         master_binary,
         "--use_od=true",
+        "--nsid=1",
         "--cluster_id=nds_thread_stress",
         "--enable_http_metadata_server=true",
         "--rpc_address=127.0.0.1",

@@ -2,7 +2,7 @@
 
 ## 概述
 
-本方案将 Mooncake Store 的磁盘持久化路径从传统文件系统（StorageBackend）替换为盘框 KV 存储（NDS），实现零拷贝的磁盘读写，同时保持与非盘框部署的兼容性。核心思路：引入 `use_od` 标志作为双后端路由开关，NDS 初始化从 `Client::Create` 延迟到 `RegisterLocalMemory` 触发，异步批量写入提升吞吐。
+本方案将 Mooncake Store 的磁盘持久化路径从传统文件系统（StorageBackend）替换为盘框 KV 存储（NDS），实现零拷贝的磁盘读写，同时保持与非盘框部署的兼容性。核心思路：引入 `use_od` 标志作为双后端路由开关，NDS 初始化从 `Client::Create` 延迟到 `RegisterLocalMemory` 触发，异步批量写入提升吞吐。**nsid（NDS namespace ID）从 Master 侧 gflag 配置，通过 `GetStorageConfig` RPC 自动下发到所有 Client，不再使用环境变量。**
 
 ---
 
@@ -15,6 +15,8 @@
 | `mooncake-store/tests/nds_client_test.cpp` | 537 行 C++ 单元测试：NDS Client 全流程（创建/注册内存/Put/Get/批量操作） |
 | `mooncake-store/tests/nds_stress_test.py` | 643 行 Python 压力测试 |
 | `mooncake-store/tests/nds_thread_stress_test.py` | 598 行 Python 多线程压力测试 |
+| `mooncake-store/tests/nds_data_correctness_test.py` | 522 行 Python 数据正确性验证（单进程单线程，逐字节 pattern 校验） |
+| `mooncake-store/tests/diagnose_network.py` | 229 行网络诊断脚本（检测 Master TCP/HTTP 连通性、系统代理干扰） |
 
 ---
 
@@ -159,6 +161,7 @@ WaitForTransfers:
   等待所有 TransferFuture（NDS future + 内存 transfer future 并发等待）
 FinalizeBatchPut:
   BatchPutEnd(MEMORY)   // 只处理 MEMORY replica
+  BatchPutRevoke        // 同时撤销 MEMORY + DISK replica（任一成功即返回成功）
 ```
 
 **关键设计：**
@@ -244,30 +247,52 @@ BatchGet (use_od_=true):
 
 ### 3.9 Master 端变更
 
-**master_config.h：** `use_od` 字段贯穿全链路
-- `MasterConfig`、`MasterServiceConfig`、`MasterServiceConfigBuilder`、`InProcMasterConfig`、`InProcMasterConfigBuilder`、`WrappedMasterServiceConfig` 全部新增 `use_od`
+**master_config.h：** `use_od` + `nsid` 字段贯穿全链路
+- `MasterConfig`、`MasterServiceSupervisorConfig`、`WrappedMasterServiceConfig`、`MasterServiceConfig`、`MasterServiceConfigBuilder`、`InProcMasterConfig`、`InProcMasterConfigBuilder` 全部新增 `bool use_od` + `uint32_t nsid`（含 setter、build、copy 构造）
+- `InProcMasterConfig` 中 `use_od` / `nsid` 为 `std::optional` 类型
+
+**master_service.h：**
+- 新增 `const uint32_t nsid_` 成员（与 `const bool use_od_` 并列）
 
 **master_service.cpp：**
-- `use_od_=true` → 强制 `use_disk_replica_=true`（即使 `root_fs_dir_` 为空）
+- 构造函数初始化 `nsid_(config.nsid)`
+- `use_od_=true` 时的防御性校验：`nsid_==0` → 禁用 DISK replica + LOG(WARNING)（不 exit/fatal）
+- `use_od_=true && nsid_>0` → `use_disk_replica_=true`
 - `PutStart` DISK replica 分配：
   - `root_fs_dir_` 非空 → 生成 `file_path = ResolvePathFromKey(key, root_fs_dir_, cluster_id_)`
   - `root_fs_dir_` 为空 → `file_path = ""`（盘框场景不需要文件路径）
 - 新增 `BatchPutEndDisk` 方法：批量调用 `PutEnd(client_id, key, ReplicaType::DISK)`
-- `GetStorageConfig` 返回新增 `use_od` 字段
+- `BatchPutRevoke` 方法变更：同时撤销 MEMORY 和 DISK replica（任一成功即返回成功，都失败才返回错误）
+- `GetStorageConfig` 返回新增 `use_od_` 和 `nsid_` 字段
 
 **rpc_service.h/cpp：**
 - `WrappedMasterService` 新增 `BatchPutEndDisk` RPC 方法
 - RPC 注册新增 `BatchPutEndDisk` handler
+- `BatchPutRevoke` 同步变更：同时撤销 MEMORY + DISK
 
 **rpc_types.h：**
-- `GetStorageConfigResponse` 新增 `use_od` 字段 + 构造函数参数 + YLT_REFL 序列化
+- `GetStorageConfigResponse` 新增 `bool use_od` + `uint32_t nsid` 字段 + 构造函数参数 + YLT_REFL 序列化（`fsdir, enable_disk_eviction, quota_bytes, use_od, nsid`）
 
 **master_client.h/cpp：**
 - `MasterClient` 新增 `BatchPutEndDisk(keys)` 方法
 - 新增 `RpcNameTraits<BatchPutEndDisk>` 特化
 
 **master.cpp：**
-- 启动时传入 `use_od` 配置
+- 新增 `DEFINE_uint32(nsid, 0, "NDS namespace ID")` gflag
+- `InitMasterConf` 新增 `default_config.GetUInt32("nsid", &master_config.nsid, FLAGS_nsid)`
+- `LoadConfigFromCmdline` 新增 cmdline override：`--nsid` 非 default → `master_config.nsid = FLAGS_nsid`
+- 启动日志新增 `nsid=X`
+- 启动校验：`use_od=true && nsid==0` → LOG(WARNING) + auto-set `use_od=false`（静默降级）
+
+**client_service.h：**
+- 新增 `uint32_t nsid_{0}` 成员（与 `bool use_od_{false}` 并列）
+
+**client_service.cpp：**
+- 两个 RPC 接收点（`GetStorageConfig` fsdir empty 和 non-empty 分支）均设置 `client->nsid_ = config.nsid` + LOG(INFO)
+- `PrepareStorageBackend` 删除 `MC_NDS_NSID` 环境变量逻辑，改为 `kv_storage_backend_->setNsid(nsid_)` + LOG(INFO) "NDS nsid set from master config"
+
+**test_server_helpers.h：**
+- `InProcMaster::Start` 新增 `config.use_od` → `wms_cfg.use_od` 传递
 
 ### 3.10 Python binding 变更
 
@@ -297,11 +322,30 @@ typedef int32_t (*NDS_batchPut_fn)(const uint64_t*, uint8_t**, const size_t*,
                                    const size_t*, const uint32_t*, uint32_t);
 ```
 
-**nsid 传递机制：**
-- 环境变量 `MC_NDS_NSID`（uint32_t 十进制字符串）在 `Client::Create` 中读取
-- `PrepareStorageBackend` 创建 `KVStorageBackend` 后立即调用 `setNsid(nsid_val)` 保存
+**nsid 传递机制（Master 侧配置 → RPC 下发 → Client 使用）：**
+
+数据流：
+```
+master --nsid=1 (gflag)
+  → MasterConfig.nsid
+    → MasterServiceConfig.nsid
+      → MasterService.nsid_
+        → GetStorageConfig RPC → GetStorageConfigResponse.nsid
+          → Client.nsid_
+            → PrepareStorageBackend → kv_storage_backend_->setNsid(nsid_)
+              → KVStorageBackend.nsid_
+                → StoreObjects/LoadObjects 内部自动填充 nsids(count, nsid_)
+```
+
+- **环境变量 `MC_NDS_NSID` 已完全移除**，不再从客户端环境读取 nsid
+- nsid 由 Master 侧 `--nsid` gflag 或配置文件统一管理，通过 `GetStorageConfig` RPC 自动下发到所有 Client
 - `KVStorageBackend` 内部成员 `nsid_`：每次调用 `batchPut/batchGet` 时自动填充 `std::vector<uint32_t> nsids(count, nsid_)` 传给 NDSLoader
 - `LoadObjects` 在 `FilereadWorkerPool::workerThread` 中调用——kv_storage_backend_ 已持有 nsid_，无需 FilereadTask/BatchFilereadTask 传递
+
+**nsid 验证逻辑（use_od=true + nsid=0 静默降级）：**
+- `master.cpp` main()：`use_od=true && nsid==0` → LOG(WARNING) + auto-set `use_od=false`
+- `MasterService` 构造函数：`use_od_=true && nsid_==0` → 禁用 `use_disk_replica_` + LOG(WARNING)
+- 不 exit/fatal，不影响其他功能正常运行
 
 **KVStorageBackend 新增：**
 ```cpp
@@ -319,6 +363,27 @@ uint32_t nsid_{0};
 
 **tests/CMakeLists.txt：**
 - 新增 `nds_client_test` 测试目标
+
+### 3.13 其他变更
+
+**http_metadata_server.cpp：**
+- `rpc_meta` duplicate key 不再返回 `bad_request`，改为 LOG(INFO) 覆盖写入（允许 metadata 更新）
+
+**storage_backend.cpp：**
+- 删除旧的 GDS KV `StoreObject(path, slices, key)` 实现（直接调 NDS put 的版本）和其后的 `#if 0` 块
+- 恢复原始的文件系统 `StoreObject(path, slices, key)` 实现（splice to string → async write）
+- 中文注释出现编码乱码（`琛` → `表示`、`鏍` → `根`、`鈮` → `≡`、`鈥` → `—`），为 UTF-8/GBK 编码冲突导致的显示问题
+
+**real_client.cpp：**
+- `Client::Create` 调用新增空 `ConfigDict` `{}` 作为最后参数
+- `setup_real` 传入 `50052, false`（rpc_port, use_od 参数）
+
+**dummy_client.h：**
+- `setup_real` 签名移除 nds_mem 参数（缩进调整）
+
+**nds_interface.h + Makefile：**
+- Makefile 从编译 mock 库简化为 header-only 声明（无编译目标）
+- `nds_interface.h` 新增 `extern "C"` 块 + `batchGet/batchPut` + nsid 参数
 
 ---
 
@@ -412,7 +477,8 @@ struct NDSLoader {
 | 不使用单独 InitNDS 方法 | 用户明确要求复用 `Init(void*, uint64_t)` 签名 |
 | NDSLoader 全局单例 | NDS C API 全是全局状态操作，不支持多实例 |
 | nsid 存储在 KVStorageBackend 中 | NDSLoader 是全局单例无法存储 per-client 状态；KVStorageBackend 与 Client 1:1 绑定，StoreObjects/LoadObjects 内部自动填充 nsids |
-| MC_NDS_NSID 环境变量在 Client::Create 中读取 | nsid 是部署级配置，不暴露给上层 API；Client::Create 调 PrepareStorageBackend 时一次性设置 |
+| nsid 由 Master 配置并通过 RPC 下发 | nsid 是部署级配置，不暴露给上层 API 或环境变量；Master gflag → MasterConfig → RPC → Client.nsid_ → KVStorageBackend.setNsid() |
+| use_od=true + nsid=0 静默降级 | 不 exit/fatal，自动禁用 DISK replica 并 LOG(WARNING)；双重校验（main() + MasterService 构造函数） |
 | use_od=true 无 root_fs_dir 时 master 返回 DISK replica | 盘框场景不需要文件路径，file_path 为空字符串 |
 | CleanupNDS() 是 public 方法 | 供 unregisterLocalMemory 和析构函数调用 |
 | batchPut 整批异步提交 | 减少 RPC 调用次数，StoreObjects 一次处理所有 disk key |
@@ -428,8 +494,13 @@ struct NDSLoader {
 ```
 Python: store.setup(use_od=True)
   ├─ Client::Create(...)
-  │    ├─ GetStorageConfig → use_od_=true
-  │    └─ PrepareStorageBackend → 创建 KVStorageBackend（不调 Init）
+  │    ├─ GetStorageConfig → use_od_=true, nsid_=1
+  │    ├─ PrepareStorageBackend → 创建 KVStorageBackend（不调 Init）→ setNsid(nsid_)
+  │    │
+  │    └─ nsid 数据流：
+  │         master --nsid=1 → MasterConfig.nsid → MasterService.nsid_
+  │           → GetStorageConfigResponse.nsid → Client.nsid_
+  │             → kv_storage_backend_->setNsid(nsid_)
   │
   └─ Python: store.register_buffer(ptr, size)
        ├─ Client::RegisterLocalMemory(ptr, size, ...)
@@ -586,9 +657,38 @@ Python: store.get(key, value)
   │         └─ per-key future.get()
 ```
 
----
+### 8.7 nsid 配置数据流
 
-## 九、测试脚本详解
+```
+启动阶段：
+  mooncake_master --use_od=true --nsid=1
+    ├─ DEFINE_uint32(nsid, 0) → FLAGS_nsid=1
+    ├─ InitMasterConf → master_config.nsid=1
+    ├─ LoadConfigFromCmdline → cmdline override (if --nsid non-default)
+    ├─ main() 校验：use_od=true && nsid==0 → auto-set use_od=false + LOG(WARNING)
+    │
+    └─ MasterService(config)
+        ├─ nsid_(config.nsid)    // 初始化 nsid_ 成员
+        ├─ 校验：use_od_=true && nsid_==0 → disable use_disk_replica_ + LOG(WARNING)
+        │
+        └─ GetStorageConfig RPC → GetStorageConfigResponse(fsdir, ..., use_od_, nsid_)
+
+Client 接收阶段：
+  Client::Create(...)
+    ├─ GetStorageConfig → config.use_od=true, config.nsid=1
+    ├─ client->use_od_ = config.use_od   // 两个分支（fsdir empty / non-empty）均设置
+    ├─ client->nsid_ = config.nsid       // 同上
+    │
+    └─ PrepareStorageBackend(...)
+        ├─ use_od_=true → 创建 KVStorageBackend
+        ├─ kv_storage_backend_->setNsid(nsid_)    // nsid 从 master config 传入
+        └─ LOG(INFO) << "NDS nsid set from master config: " << nsid_
+
+NDS 调用阶段：
+  KVStorageBackend::StoreObjects / LoadObjects
+    ├─ std::vector<uint32_t> nsids(count, nsid_)  // 自动填充 nsid_ 到每个 block
+    └─ NDSLoader::batchPut/batchGet(blockIds, addrs, offsets, lengths, nsids, count)
+```
 
 ### 9.1 nds_client_test.cpp — C++ GTest 单元测试
 
@@ -599,7 +699,7 @@ Python: store.get(key, value)
 2. `TearDownTestSuite()`：释放 buffer → CleanupClients → Stop Master → 删除临时目录
 
 **关键配置：**
-- Master 启动：`InProcMasterConfigBuilder().set_use_od(true).set_enable_disk_eviction(true).set_root_fs_dir(tmp_dir)`
+- Master 启动：`InProcMasterConfigBuilder().set_use_od(true).set_nsid(1).set_enable_disk_eviction(true).set_root_fs_dir(tmp_dir)`
 - Client 创建：`Client::Create("localhost:17820", "P2PHANDSHAKE", FLAGS_protocol, std::nullopt, master_address_, nullptr, {})`
 - 内存注册：`RegisterLocalMemory(buffer_allocator_->getBase(), 256MB, "cpu:0")` — **这是触发 NDS init 的关键步骤**
 - Segment：512MB RAM buffer，由 segment_provider MountSegment
@@ -659,7 +759,7 @@ MC_METADATA_SERVER=http://127.0.0.1:8080/metadata \
 **测试架构：** 多进程模型 — 每个 Worker 是独立进程，各自拥有独立的 MooncakeDistributedStore + NDS 实例。通过 `multiprocessing.Queue` 收集统计信息，主进程监控并汇总。
 
 **执行流程：**
-1. **Phase I — 启动 Master**：`mooncake_master --use_od=true` 子进程，自动分配 RPC/HTTP/Metrics 端口
+1. **Phase I — 启动 Master**：`mooncake_master --use_od=true --nsid=1` 子进程，自动分配 RPC/HTTP/Metrics 端口
 2. **Phase I — Spawn Worker 进程**：每个 Worker 进程独立 setup + register_buffer + NDS init
 3. **Phase II — 压力测试**：Worker 在 `duration` 秒内持续执行 batch_put/batch_get 操作
 4. **Phase III — 停止 & 汇总**：收集最终统计数据，输出 Final Report
@@ -701,6 +801,7 @@ MC_METADATA_SERVER=http://127.0.0.1:8080/metadata \
 ```bash
 mooncake_master \
   --use_od=true \
+  --nsid=1 \
   --cluster_id=nds_stress \
   --enable_http_metadata_server=true \
   --rpc_address=127.0.0.1 \
@@ -771,7 +872,7 @@ python nds_stress_test.py --operation-mode=mixed
 | batch_get 预热 | 无（纯 Get 需先手动 Put） | 有 warmup 阶段（自动 BatchPut 所有 slot） |
 
 **执行流程：**
-1. **启动 Master**：同 nds_stress_test.py（`--use_od=true`）
+1. **启动 Master**：同 nds_stress_test.py（`--use_od=true --nsid=1`）
 2. **Phase I — 初始化 Store**：主进程 mmap 总 buffer（`num_threads × batch_size × block_size`），`MooncakeDistributedStore.setup()` + `register_buffer()`（触发 NDS init）
 3. **Phase II — Spawn 线程**：每个线程拿到 buffer 的一个分片偏移
 4. **Phase III — 压力测试**：线程循环执行 batch_put/batch_get/mixed
@@ -915,6 +1016,30 @@ python nds_data_correctness_test.py \
 
 ---
 
+### 9.5 diagnose_network.py — 网络诊断脚本
+
+**定位：** `mooncake-store/tests/diagnose_network.py`，229 行，用于诊断 Master 进程启动后网络连通性问题（特别是 Windows 系统代理干扰 localhost 请求的场景）。
+
+**诊断步骤：**
+1. 检查环境变量中的代理设置（`http_proxy` / `HTTP_PROXY` 等）
+2. 启动 Master 进程（`--use_od=true --nsid=1`）
+3. 检查 Master 进程是否存活
+4. 检查 RPC TCP 端口连通性（带 retry）
+5. 检查 HTTP metadata 端口 TCP 连通性
+6. 用 DEFAULT opener（可能走系统代理）发 HTTP 请求
+7. 用 NO-PROXY opener（强制绕过代理）发 HTTP 请求
+8. 用 raw socket 发 HTTP 请求（不可能走代理）
+9. 打印 urllib proxy handler 诊断
+10. 根据结果给出结论：
+   - 端口不可达 → firewall 或 bind 失败
+   - DEFAULT 失败 + NO-PROXY 成功 → 代理干扰
+   - 都成功 → 网络正常
+   - 都失败 → HTTP 协议层问题
+
+**Master 启动配置：** `--use_od=true --nsid=1 --cluster_id=diag_test`
+
+---
+
 ## 十、构建变更
 
 - 移除 `ndsclient` 库链接依赖（不再需要静态编译的 mock 库）
@@ -922,3 +1047,4 @@ python nds_data_correctness_test.py \
 - `NDS_LIBRARY_PATH` 环境变量可指定 so 路径
 - CMake 新增 `kv_storage_backend.cpp` 源文件
 - CMake 新增 `nds_client_test` 测试目标
+- `MC_NDS_NSID` 环境变量已完全移除，nsid 通过 Master gflag `--nsid` 配置

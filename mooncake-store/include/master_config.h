@@ -51,6 +51,7 @@ struct MasterConfig {
     bool enable_disk_eviction;
     uint64_t quota_bytes;
     bool use_od;
+    uint32_t nsid;
 
     bool enable_snapshot_restore;
     bool enable_snapshot;
@@ -110,6 +111,7 @@ class MasterServiceSupervisorConfig {
     bool enable_disk_eviction = true;
     uint64_t quota_bytes = 0;
     bool use_od = false;
+    uint32_t nsid = 0;
     uint32_t max_total_finished_tasks = DEFAULT_MAX_TOTAL_FINISHED_TASKS;
     uint32_t max_total_pending_tasks = DEFAULT_MAX_TOTAL_PENDING_TASKS;
     uint32_t max_total_processing_tasks = DEFAULT_MAX_TOTAL_PROCESSING_TASKS;
@@ -177,6 +179,7 @@ class MasterServiceSupervisorConfig {
         enable_disk_eviction = config.enable_disk_eviction;
         quota_bytes = config.quota_bytes;
         use_od = config.use_od;
+        nsid = config.nsid;
 
         enable_snapshot_restore = config.enable_snapshot_restore;
         enable_snapshot = config.enable_snapshot;
@@ -267,6 +270,7 @@ class WrappedMasterServiceConfig {
     bool enable_disk_eviction = true;
     uint64_t quota_bytes = 0;
     bool use_od = false;
+    uint32_t nsid = 0;
 
     bool enable_snapshot_restore = false;
     bool enable_snapshot = false;
@@ -314,6 +318,7 @@ class WrappedMasterServiceConfig {
         enable_disk_eviction = config.enable_disk_eviction;
         quota_bytes = config.quota_bytes;
         use_od = config.use_od;
+        nsid = config.nsid;
 
         // Convert string memory_allocator to BufferAllocatorType enum
         if (config.memory_allocator == "cachelib") {
@@ -435,6 +440,7 @@ class MasterServiceConfigBuilder {
     bool enable_disk_eviction_ = true;
     uint64_t quota_bytes_ = 0;
     bool use_od_ = false;
+    uint32_t nsid_ = 0;
     uint64_t put_start_discard_timeout_sec_ = DEFAULT_PUT_START_DISCARD_TIMEOUT;
     uint64_t put_start_release_timeout_sec_ = DEFAULT_PUT_START_RELEASE_TIMEOUT;
     bool enable_snapshot_restore_ = false;
@@ -638,6 +644,11 @@ class MasterServiceConfigBuilder {
         return *this;
     }
 
+    MasterServiceConfigBuilder& set_nsid(uint32_t nsid) {
+        nsid_ = nsid;
+        return *this;
+    }
+
     MasterServiceConfig build() const;
 };
 
@@ -675,6 +686,7 @@ class MasterServiceConfig {
     bool enable_disk_eviction = true;
     uint64_t quota_bytes = 0;
     bool use_od = false;
+    uint32_t nsid = 0;
 
     bool enable_snapshot_restore = false;
     bool enable_snapshot = false;
@@ -721,6 +733,7 @@ class MasterServiceConfig {
         enable_disk_eviction = config.enable_disk_eviction;
         quota_bytes = config.quota_bytes;
         use_od = config.use_od;
+        nsid = config.nsid;
         put_start_discard_timeout_sec = config.put_start_discard_timeout_sec;
         put_start_release_timeout_sec = config.put_start_release_timeout_sec;
 
@@ -774,6 +787,7 @@ inline MasterServiceConfig MasterServiceConfigBuilder::build() const {
     config.enable_disk_eviction = enable_disk_eviction_;
     config.quota_bytes = quota_bytes_;
     config.use_od = use_od_;
+    config.nsid = nsid_;
     config.enable_snapshot_restore = enable_snapshot_restore_;
     config.enable_snapshot = enable_snapshot_;
     config.snapshot_backup_dir = snapshot_backup_dir_;
@@ -817,6 +831,7 @@ struct InProcMasterConfig {
     std::optional<bool> enable_disk_eviction;
     std::optional<uint64_t> quota_bytes;
     std::optional<bool> use_od;
+    std::optional<uint32_t> nsid;
 };
 
 // Builder class for InProcMasterConfig
@@ -834,6 +849,7 @@ class InProcMasterConfigBuilder {
     std::optional<bool> enable_disk_eviction_ = std::nullopt;
     std::optional<uint64_t> quota_bytes_ = std::nullopt;
     std::optional<bool> use_od_ = std::nullopt;
+    std::optional<uint32_t> nsid_ = std::nullopt;
 
    public:
     InProcMasterConfigBuilder() = default;
@@ -902,6 +918,11 @@ class InProcMasterConfigBuilder {
         return *this;
     }
 
+    InProcMasterConfigBuilder& set_nsid(uint32_t nsid) {
+        nsid_ = nsid;
+        return *this;
+    }
+
     InProcMasterConfig build() const;
 };
 
@@ -920,6 +941,7 @@ inline InProcMasterConfig InProcMasterConfigBuilder::build() const {
     config.enable_disk_eviction = enable_disk_eviction_;
     config.quota_bytes = quota_bytes_;
     config.use_od = use_od_;
+    config.nsid = nsid_;
     return config;
 }
 

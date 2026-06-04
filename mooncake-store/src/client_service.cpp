@@ -501,7 +501,9 @@ std::optional<std::shared_ptr<Client>> Client::Create(
     } else {
         auto config = config_response.value();
         client->use_od_ = config.use_od;
+        client->nsid_ = config.nsid;
         LOG(INFO) << "Use OD: " << config.use_od;
+        LOG(INFO) << "NDS nsid: " << config.nsid;
         if (config.fsdir.empty()) {
             LOG(INFO)
                 << "Storage root directory is not set. persisting data is "
@@ -519,7 +521,9 @@ std::optional<std::shared_ptr<Client>> Client::Create(
                           << config.enable_disk_eviction;
                 LOG(INFO) << "Quota bytes: " << config.quota_bytes;
                 client->use_od_ = config.use_od;
+                client->nsid_ = config.nsid;
                 LOG(INFO) << "Use OD: " << config.use_od;
+                LOG(INFO) << "NDS nsid: " << config.nsid;
                 client->PrepareStorageBackend(storage_root_dir, fs_subdir,
                                               config.enable_disk_eviction,
                                               config.quota_bytes);
@@ -2241,14 +2245,8 @@ void Client::PrepareStorageBackend(const std::string& storage_root_dir,
     std::string real_fsdir = "moon_" + fsdir;
     if (use_od_) {
         kv_storage_backend_ = std::make_shared<KVStorageBackend>();
-        const char* nsid_env = std::getenv("MC_NDS_NSID");
-        if (nsid_env) {
-            uint32_t nsid_val = static_cast<uint32_t>(std::strtoul(nsid_env, nullptr, 10));
-            kv_storage_backend_->setNsid(nsid_val);
-            LOG(INFO) << "NDS nsid set from MC_NDS_NSID: " << nsid_val;
-        }else {
-            LOG(INFO) << ">>>>>>>>> NDS nsid not set from MC_NDS_NSID: ";
-        }
+        kv_storage_backend_->setNsid(nsid_);
+        LOG(INFO) << "NDS nsid set from master config: " << nsid_;
     } else {
 #ifdef USE_3FS
         std::filesystem::path root_path(storage_root_dir);
