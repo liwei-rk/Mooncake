@@ -1,0 +1,30 @@
+# LMCache config for Prefiller (NDS mode, L2-bypassed for pure L3 demo)
+#
+# Key differences from mooncake-nds-pd-test configs:
+#   1. local_cpu: False          — Disable L2 (CPU) hot_cache, no local caching on store
+#   2. max_local_cpu_size: 2     — Minimum allocator buffer for Mooncake RDMA transfers (must >0)
+#   3. retrieve_locations        — Force lookup/retrieve to ONLY check L3 (RemoteBackend)
+#   4. save_chunk_meta: false    — Zero-copy mode, no metadata stored remotely
+#
+# Result: KV data is stored directly to Mooncake NDS and retrieved ONLY from NDS,
+#         bypassing L2 (CPU) cache entirely. This ensures TTFT difference reflects
+#         pure NDS performance, not local cache hit.
+
+chunk_size: 256
+local_cpu: False
+max_local_cpu_size: 2
+
+remote_url: "mooncakestore://localhost:50051/"
+remote_serde: "naive"
+save_chunk_meta: false
+retrieve_locations: ["RemoteBackend"]
+
+extra_config:
+  local_hostname: "prefiller-host"
+  metadata_server: "http://localhost:8005/metadata"
+  protocol: "rdma"
+  device_name: ""
+  master_server_address: "localhost:50051"
+  global_segment_size: 0
+  local_buffer_size: 0
+  transfer_timeout: 5
