@@ -1330,16 +1330,14 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
         return;
     }
 
-    // NDS: async batched disk write via write_thread_pool_
-    // Submit the entire batch as one StoreObjects call for efficiency.
-    // StoreObjects + BatchPutEndDisk/PutRevoke run asynchronously, with
-    // per-key TransferFutures in pending_transfers so WaitForTransfers can
-    // wait on both NDS disk writes and memory transfers concurrently.
+    // NDS: fire-and-forget async batched disk write via write_thread_pool_
+    // Memory transfer success/failure is independent of NDS write.
+    // If NDS write succeeds: DISK replica is finalized via BatchPutEndDisk.
+    // If NDS write fails: DISK replica is revoked via PutRevoke(DISK),
+    // but MEMORY replica (if successful) remains valid.
     if (use_od_) {
         std::vector<std::string> nds_keys;
         std::vector<std::vector<Slice>> nds_slices;
-        std::vector<std::shared_ptr<MemcpyOperationState>> nds_states;
-        std::vector<size_t> nds_op_indices;
 
         for (size_t i = 0; i < ops.size(); ++i) {
             auto& op = ops[i];
@@ -1361,18 +1359,12 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
 
             nds_keys.emplace_back(op.key);
             nds_slices.emplace_back(op.slices);
-            auto nds_state = std::make_shared<MemcpyOperationState>();
-            nds_states.emplace_back(nds_state);
-            nds_op_indices.emplace_back(i);
-            op.pending_transfers.emplace_back(TransferFuture(nds_state));
         }
 
         if (!nds_keys.empty()) {
             write_thread_pool_.enqueue(
                 [this, b_keys = std::move(nds_keys),
-                 b_slices = std::move(nds_slices),
-                 b_states = std::move(nds_states),
-                 b_indices = std::move(nds_op_indices)]() mutable {
+                 b_slices = std::move(nds_slices)]() mutable {
                     auto nds_result = kv_storage_backend_->StoreObjects(
                         b_keys, b_slices);
                     if (!nds_result) {
@@ -1386,8 +1378,6 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                                     << "Failed to revoke DISK put for key: "
                                     << b_keys[j];
                             }
-                            b_states[j]->set_completed(
-                                ErrorCode::FILE_READ_FAIL);
                         }
                         return;
                     }
@@ -1397,7 +1387,13 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                         LOG(ERROR)
                             << "BatchPutEndDisk response size mismatch";
                         for (size_t j = 0; j < b_keys.size(); ++j) {
-                            b_states[j]->set_completed(ErrorCode::RPC_FAIL);
+                            auto revoke_result = master_client_.PutRevoke(
+                                b_keys[j], ReplicaType::DISK);
+                            if (!revoke_result) {
+                                LOG(ERROR)
+                                    << "Failed to revoke DISK put for key: "
+                                    << b_keys[j];
+                            }
                         }
                         return;
                     }
@@ -1412,10 +1408,9 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                                     << "Failed to revoke DISK put for key: "
                                     << b_keys[j];
                             }
-                            b_states[j]->set_completed(
-                                end_results[j].error());
                         } else {
-                            b_states[j]->set_completed(ErrorCode::OK);
+                            VLOG(1) << "NDS write completed for key "
+                                    << b_keys[j];
                         }
                     }
                 });
@@ -1443,11 +1438,21 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
         if (op.IsResolved()) continue;
         if (op.replicas.empty()) continue;
 
-        bool all_transfers_submitted = true;
+        bool has_disk_replica = false;
+        for (const auto& r : op.replicas) {
+            if (r.is_disk_replica()) has_disk_replica = true;
+        }
+
+bool all_transfers_submitted = true;
+        bool has_disk_replica = false;
         std::string failure_context;
         for (size_t replica_idx = 0; replica_idx < op.replicas.size();
              ++replica_idx) {
             const auto& replica = op.replicas[replica_idx];
+            if (replica.is_disk_replica()) {
+                has_disk_replica = true;
+                continue;
+            }
             if (replica.is_memory_replica()) {
                 auto submit_result = transfer_submitter_->submit(
                     replica, op.slices, TransferRequest::WRITE);
@@ -1463,6 +1468,32 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                 op.pending_transfers.emplace_back(
                     std::move(submit_result.value()));
             }
+        }
+
+        if (!all_transfers_submitted) {
+            LOG(ERROR) << "Transfer submission failed for key " << op.key
+                       << ": " << failure_context;
+            op.SetError(ErrorCode::TRANSFER_FAIL, failure_context);
+            op.pending_transfers.clear();
+        } else {
+            if (has_disk_replica && op.pending_transfers.empty()) {
+                op.pending_transfers.emplace_back(
+                    TransferFuture(std::make_shared<EmptyOperationState>()));
+            }
+            VLOG(1) << "Successfully submitted "
+                    << op.pending_transfers.size()
+                    << " transfers for key " << op.key;
+        }
+    }
+
+                op.pending_transfers.emplace_back(
+                    std::move(submit_result.value()));
+            }
+        }
+
+        if (op.pending_transfers.empty() && has_disk_replica) {
+            op.pending_transfers.emplace_back(
+                TransferFuture(std::make_shared<EmptyOperationState>()));
         }
 
         if (!all_transfers_submitted) {

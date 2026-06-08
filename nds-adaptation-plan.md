@@ -812,17 +812,78 @@ BatchGet:
 **kv_v6 新流程（use_od_=true，按类型分组并行提交）：**
 ```
 BatchGet (use_od_=true):
-  逐key查找replica → FindFirstCompleteReplica（跳过LOCAL_DISK）
-  → 按类型分组：
-    MEMORY组: memory_replicas / memory_slices / memory_indices
-    DISK组:   disk_replicas / disk_slices / disk_indices
-  → Phase 1: 同时提交两组（并发启动传输）
-    mem_future  = submit_batch(memory_replicas, memory_slices, READ)
-    disk_future = submit_batch(disk_replicas, disk_slices, READ)
-  → Phase 2: 等待 MEMORY 组
-    mem_future->get() → 设置 memory_indices 各key结果
-  → Phase 3: 等待 DISK 组
-    disk_future->get() → 设置 disk_indices 各key结果
+
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │  for each key in object_keys:                                       │
+  │    ├─ slices.find(key) 失败 → results[i] = INVALID_PARAMS; continue│
+  │    ├─ FindFirstCompleteReplica(replicas)                            │
+  │    │   ├─ 遍历 replica_list, 跳过 LOCAL_DISK                       │
+  │    │   ├─ 找到 COMPLETE 的 MEMORY 或 DISK → return OK              │
+  │    │   └─ 未找到 → return INVALID_REPLICA                          │
+  │    │       → results[i] = INVALID_REPLICA; continue                │
+  │    │                                                                 │
+  │    ├─ replica.is_memory_replica()?                                  │
+  │    │   YES → 放入 MEMORY 组:                                        │
+  │    │         memory_replicas.push(replica)                          │
+  │    │         memory_slices.push(slices)                             │
+  │    │         memory_indices.push(i)                                 │
+  │    │   NO (DISK) → 放入 DISK 组:                                    │
+  │    │         disk_replicas.push(replica)                            │
+  │    │         disk_slices.push(slices)                               │
+  │    │         disk_indices.push(i)                                   │
+  └─────────────────────────────────────────────────────────────────────┘
+
+          ┌───────────────┐        ┌───────────────┐
+          │  MEMORY 组     │        │  DISK 组       │
+          │  (非空时)       │        │  (非空时)       │
+          └─┬─────────────┘        └─┬─────────────┘
+            │                        │
+  ┌─────────▼────────────────────────▼─────────────────────────────────┐
+  │ Phase 1: 同时提交（并发启动传输）                                     │
+  │                                                                     │
+  │  mem_future  = submit_batch(memory_replicas, memory_slices, READ)   │
+  │  disk_future = submit_batch(disk_replicas, disk_slices, READ)       │
+  │                                                                     │
+  │  submit_batch 路由:                                                  │
+  │  ┌─ replicas[0].is_disk_replica() && use_od_                       │
+  │  │  → submitBatchFileReadOperation                                 │
+  │  │    → nds_keys = replica.get_disk_descriptor().file_path          │
+  │  │    → BatchFilereadTask(nds_keys, batched_slices, state)          │
+  │  │    → fileread_pool_->submitBatchTask(task)                       │
+  │  │    → return TransferFuture(state)                                │
+  │  │                                                                   │
+  │  └─ 否则（MEMORY）                                                   │
+  │     → selectStrategy → LOCAL_MEMCPY / RDMA / TCP                   │
+  │     → submitBatchMemcpyOperation / submitTransfer                   │
+  │     → return TransferFuture                                         │
+  └─────────────────────────────────────────────────────────────────────┘
+
+          ┌───────────────┐        ┌───────────────┐
+          │  mem_future    │        │  disk_future   │
+          └─┬─────────────┘        └─┬─────────────┘
+            │                        │
+  ┌─────────▼──────────────────────────────────────────────────────────┐
+  │ Phase 2: 等待 MEMORY 组                                             │
+  │                                                                     │
+  │  mem_result = mem_future->get()                                     │
+  │  ├─ OK  → for idx in memory_indices: results[idx] = {}              │
+  │  └─ FAIL → for idx in memory_indices: results[idx] = TRANSFER_FAIL │
+  └─────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────▼
+  │ Phase 3: 等待 DISK 组                                               │
+  │                                                                     │
+  │  disk_result = disk_future->get()                                   │
+  │  ├─ OK  → for idx in disk_indices: results[idx] = {}                │
+  │  └─ FAIL → for idx in disk_indices: results[idx] = TRANSFER_FAIL   │
+  │                                                                     │
+  │  (DISK 组失败时 LOG(ERROR) "Disk (NDS) batch transfer failed")     │
+  └─────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ 最终检查: for each key, if lease expired → results[i] = LEASE_EXPIRED│
+  │ metrics: batch_get_latency_us                                       │
+  └─────────────────────────────────────────────────────────────────────┘
 ```
 
 **逻辑变更：**
