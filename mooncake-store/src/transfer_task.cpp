@@ -537,8 +537,11 @@ std::optional<TransferFuture> TransferSubmitter::submit(
                 LOG(ERROR) << "Unknown transfer strategy: " << strategy;
                 return std::nullopt;
         }
-    } else {
+    } else if (replica.is_disk_replica()) {
         future = submitFileReadOperation(replica, slices, op_code);
+    } else {
+        LOG(ERROR) << "Unsupported replica type (LOCAL_DISK) in TransferSubmitter::submit";
+        return std::nullopt;
     }
 
     // Update metrics on successful submission
@@ -554,6 +557,13 @@ std::optional<TransferFuture> TransferSubmitter::submit_batch(
     std::vector<std::vector<Slice>>& all_slices,
     TransferRequest::OpCode op_code) {
     if (replicas.empty() || all_slices.empty()) return std::nullopt;
+
+    for (const auto& r : replicas) {
+        if (r.is_local_disk_replica()) {
+            LOG(ERROR) << "LOCAL_DISK replicas not supported in submit_batch";
+            return std::nullopt;
+        }
+    }
 
     if (replicas[0].is_disk_replica() && use_od_) {
         return submitBatchFileReadOperation(replicas, all_slices, op_code);

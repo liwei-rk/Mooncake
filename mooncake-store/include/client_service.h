@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <atomic>
 #include <boost/functional/hash.hpp>
@@ -572,11 +572,13 @@ void PrepareStorageBackend(const std::string& storage_root_dir,
                             const Replica::Descriptor& replica);
 
     /**
-     * @brief Find a complete replica from a replica list
+     * @brief Find a supported complete replica (MEMORY or DISK) from a replica
+     * list, skipping LOCAL_DISK replicas which are not supported in current
+     * transfer paths.
      * @param replica_list List of replicas to search through
-     * @param replica the found complete replica (file or memory)
-     * @return ErrorCode::OK if found, ErrorCode::INVALID_REPLICA if no complete
-     * replica
+     * @param replica the found supported complete replica
+     * @return ErrorCode::OK if found, ErrorCode::INVALID_REPLICA if no supported
+     * complete replica
      */
     ErrorCode FindFirstCompleteReplica(
         const std::vector<Replica::Descriptor>& replica_list,

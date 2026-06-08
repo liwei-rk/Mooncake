@@ -875,9 +875,13 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
     size_t total_cache_hits = 0;
 
     if (use_od_) {
-        std::vector<Replica::Descriptor> batch_replicas;
-        std::vector<std::vector<Slice>> batch_slices;
-        std::vector<size_t> batch_indices;
+        std::vector<Replica::Descriptor> memory_replicas;
+        std::vector<std::vector<Slice>> memory_slices;
+        std::vector<size_t> memory_indices;
+
+        std::vector<Replica::Descriptor> disk_replicas;
+        std::vector<std::vector<Slice>> disk_slices;
+        std::vector<size_t> disk_indices;
 
         for (size_t i = 0; i < object_keys.size(); ++i) {
             const auto& key = object_keys[i];
@@ -893,39 +897,78 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
             ErrorCode err = FindFirstCompleteReplica(query_result.replicas, replica);
             if (err != ErrorCode::OK) {
                 if (err == ErrorCode::INVALID_REPLICA) {
-                    LOG(ERROR) << "no_complete_replicas_found key=" << key;
+                    LOG(ERROR) << "no_supported_replicas_found key=" << key;
                 }
                 results[i] = tl::unexpected(err);
                 continue;
             }
 
-            batch_replicas.push_back(std::move(replica));
-            batch_slices.push_back(slices_it->second);
-            batch_indices.push_back(i);
+            if (replica.is_memory_replica()) {
+                memory_replicas.push_back(std::move(replica));
+                memory_slices.push_back(slices_it->second);
+                memory_indices.push_back(i);
+            } else if (replica.is_disk_replica()) {
+                disk_replicas.push_back(std::move(replica));
+                disk_slices.push_back(slices_it->second);
+                disk_indices.push_back(i);
+            }
         }
 
-        if (!batch_replicas.empty()) {
-            auto future = transfer_submitter_->submit_batch(
-                batch_replicas, batch_slices, TransferRequest::READ);
-            if (!future) {
-                LOG(ERROR) << "Failed to submit batch NDS transfer for "
-                           << batch_replicas.size() << " keys";
-                for (size_t idx : batch_indices) {
+        std::optional<TransferFuture> mem_future;
+        std::optional<TransferFuture> disk_future;
+
+        if (!memory_replicas.empty()) {
+            mem_future = transfer_submitter_->submit_batch(
+                memory_replicas, memory_slices, TransferRequest::READ);
+        }
+
+        if (!disk_replicas.empty()) {
+            disk_future = transfer_submitter_->submit_batch(
+                disk_replicas, disk_slices, TransferRequest::READ);
+        }
+
+        if (!memory_replicas.empty()) {
+            if (!mem_future) {
+                LOG(ERROR) << "Failed to submit memory batch transfer for "
+                           << memory_replicas.size() << " keys";
+                for (size_t idx : memory_indices) {
                     results[idx] = tl::unexpected(ErrorCode::TRANSFER_FAIL);
                 }
             } else {
-                VLOG(1) << "Submitted batch NDS transfer for "
-                         << batch_replicas.size() << " keys";
-                ErrorCode batch_result = future->get();
-                if (batch_result != ErrorCode::OK) {
-                    LOG(ERROR) << "Batch NDS transfer failed";
-                    for (size_t idx : batch_indices) {
-                        results[idx] = tl::unexpected(batch_result);
+                ErrorCode mem_result = mem_future->get();
+                if (mem_result != ErrorCode::OK) {
+                    LOG(ERROR) << "Memory batch transfer failed";
+                    for (size_t idx : memory_indices) {
+                        results[idx] = tl::unexpected(mem_result);
                     }
                 } else {
-                    VLOG(1) << "Batch NDS transfer succeeded for "
-                             << batch_replicas.size() << " keys";
-                    for (size_t idx : batch_indices) {
+                    VLOG(1) << "Memory batch transfer succeeded for "
+                             << memory_replicas.size() << " keys";
+                    for (size_t idx : memory_indices) {
+                        results[idx] = {};
+                    }
+                }
+            }
+        }
+
+        if (!disk_replicas.empty()) {
+            if (!disk_future) {
+                LOG(ERROR) << "Failed to submit disk batch transfer for "
+                           << disk_replicas.size() << " keys";
+                for (size_t idx : disk_indices) {
+                    results[idx] = tl::unexpected(ErrorCode::TRANSFER_FAIL);
+                }
+            } else {
+                ErrorCode disk_result = disk_future->get();
+                if (disk_result != ErrorCode::OK) {
+                    LOG(ERROR) << "Disk (NDS) batch transfer failed";
+                    for (size_t idx : disk_indices) {
+                        results[idx] = tl::unexpected(disk_result);
+                    }
+                } else {
+                    VLOG(1) << "Disk (NDS) batch transfer succeeded for "
+                             << disk_replicas.size() << " keys";
+                    for (size_t idx : disk_indices) {
                         results[idx] = {};
                     }
                 }
@@ -1324,7 +1367,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
             op.pending_transfers.emplace_back(TransferFuture(nds_state));
         }
 
-if (!nds_keys.empty()) {
+        if (!nds_keys.empty()) {
             write_thread_pool_.enqueue(
                 [this, b_keys = std::move(nds_keys),
                  b_slices = std::move(nds_slices),
@@ -2356,9 +2399,12 @@ ErrorCode Client::TransferRead(const Replica::Descriptor& replica_descriptor,
     if (replica_descriptor.is_memory_replica()) {
         auto& mem_desc = replica_descriptor.get_memory_descriptor();
         total_size = mem_desc.buffer_descriptor.size_;
-    } else {
+    } else if (replica_descriptor.is_disk_replica()) {
         auto& disk_desc = replica_descriptor.get_disk_descriptor();
         total_size = disk_desc.object_size;
+    } else {
+        LOG(ERROR) << "Unsupported replica type (LOCAL_DISK) in TransferRead";
+        return ErrorCode::INVALID_REPLICA;
     }
 
     size_t slices_size = CalculateSliceSize(slices);
@@ -2647,7 +2693,8 @@ ErrorCode Client::FindFirstCompleteReplica(
     const std::vector<Replica::Descriptor>& replica_list,
     Replica::Descriptor& replica) {
     for (size_t i = 0; i < replica_list.size(); ++i) {
-        if (replica_list[i].status == ReplicaStatus::COMPLETE) {
+        if (replica_list[i].status == ReplicaStatus::COMPLETE &&
+            !replica_list[i].is_local_disk_replica()) {
             replica = replica_list[i];
             return ErrorCode::OK;
         }
