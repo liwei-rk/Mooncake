@@ -149,11 +149,15 @@ MEMORY 副本被驱逐后：无"重新加热"机制 — 数据永远留在 NDS�
 **NDSLoader typedefs：**
 ```cpp
 typedef int32_t (*NDS_init_fn)(void*, uint64_t, const char*);
-typedef int32_t (*NDS_get_fn)(uint64_t, uint8_t*, size_t, size_t, uint32_t);
-typedef int32_t (*NDS_put_fn)(uint64_t, uint8_t*, size_t, size_t, uint32_t);
-typedef int32_t (*NDS_batchGet_fn)(const uint64_t*, uint8_t**, const size_t*, const size_t*, const uint32_t*, uint32_t);
-typedef int32_t (*NDS_batchPut_fn)(const uint64_t*, uint8_t**, const size_t*, const size_t*, const uint32_t*, uint32_t);
+typedef int32_t (*NDS_isExists_fn)(const uint64_t*, const uint64_t*, size_t);
+typedef int32_t (*NDS_get_fn)(uint64_t, uint64_t, uint8_t*, size_t, size_t, uint32_t);
+typedef int32_t (*NDS_put_fn)(uint64_t, uint64_t, uint8_t*, size_t, size_t, uint32_t);
+typedef int32_t (*NDS_batchGet_fn)(const uint64_t*, const uint64_t*, uint8_t**,
+                                   const size_t*, const size_t*, const uint32_t*, size_t);
+typedef int32_t (*NDS_batchPut_fn)(const uint64_t*, const uint64_t*, uint8_t**,
+                                   const size_t*, const size_t*, const uint32_t*, size_t);
 ```
+NDS key 用 `(keyHigh, keyLow)` 两个 uint64_t 表示。KVStorageBackend 内部 key 为单个 uint64_t，调用时 `keyHigh=0, keyLow=blockId`。
 
 **NDSLoader::Load()：** `MC_NDS_CONFIG` 环境变量（默认 `nds_config.conf`）；所有 `dlsym` 改用 `c_*` C-linkage 符号名
 
