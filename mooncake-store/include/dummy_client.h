@@ -23,8 +23,8 @@ class DummyClient : public PyClient {
                    size_t global_segment_size, size_t local_buffer_size,
                    const std::string &protocol, const std::string &rdma_devices,
                    const std::string &master_server_addr,
-const std::shared_ptr<TransferEngine> &transfer_engine,
-               const std::string &ipc_socket_path) {
+                   const std::shared_ptr<TransferEngine> &transfer_engine,
+                   const std::string &ipc_socket_path) {
         // Dummy client does not support real setup
         return -1;
     };

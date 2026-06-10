@@ -784,11 +784,14 @@ class BucketStorageBackend : public StorageBackendInterface {
     /**
      * @brief Checks whether the backend is allowed to continue offloading.
      * @return tl::expected<bool, ErrorCode>
-     * - On success: true 琛ㄧず鍙互缁х画 offload锛沠alse 琛ㄧず杈惧埌涓婇檺/涓嶅厑璁哥户缁€?     * - On failure: 杩斿洖閿欒鐮侊紙渚嬪 IO/鍐呴儴閿欒锛夈€?     */
+     * - On success: true 表示可以继续 offload；false 表示达到上限/不允许继续。
+     * - On failure: 返回错误码（例如 IO/内部错误）。
+     * */
     tl::expected<bool, ErrorCode> IsEnableOffloading() override;
 
     /**
-     * @brief 鏍规嵁鍚庣 bucket 闄愬埗锛坘eys/size锛夊皢 offloading_objects 鍒嗘《銆?     * @param offloading_objects Input map of object keys and their sizes
+     * @brief 根据后端 bucket 限制（keys/size）将 offloading_objects 分桶。
+     * @param offloading_objects Input map of object keys and their sizes
      * (bytes).
      * @param buckets_keys Output: bucketized keys; each inner vector is a
      * bucket.
@@ -977,7 +980,7 @@ class BucketStorageBackend : public StorageBackendInterface {
     std::map<int64_t, std::shared_ptr<BucketMetadata>> GUARDED_BY(
         mutex_) buckets_;
     // LRU eviction index: ordered set of {last_access_ns_, bucket_id}.
-    // Maintained lazily 鈥?reads update last_access_ns_ atomically without
+    // Maintained lazily — reads update last_access_ns_ atomically without
     // touching this index; SelectEvictionCandidate() repairs stale entries.
     std::set<std::pair<int64_t, int64_t>> GUARDED_BY(mutex_) lru_index_;
     int64_t GUARDED_BY(mutex_) next_bucket_ = -1;
@@ -1174,7 +1177,7 @@ class OffsetAllocatorStorageBackend : public StorageBackendInterface {
 
     // Maps key to shard index [0, kNumShards) using hash. Same key always maps
     // to same shard. Uses bitwise AND instead of modulo (%) for speed: hash &
-    // (kNumShards-1) 鈮?hash % kNumShards This optimization only works when
+    // (kNumShards-1) ≡ hash % kNumShards This optimization only works when
     // kNumShards is a power of 2 (enforced by static_assert)
     inline size_t ShardForKey(const std::string& key) const {
         return std::hash<std::string>{}(key) & (kNumShards - 1);

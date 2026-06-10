@@ -869,6 +869,32 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
     const std::vector<QueryResult>& query_results,
     std::unordered_map<std::string, std::vector<Slice>>& slices,
     bool prefer_same_node) {
+    if (!transfer_submitter_) {
+        LOG(ERROR) << "TransferSubmitter not initialized";
+        std::vector<tl::expected<void, ErrorCode>> results;
+        results.reserve(object_keys.size());
+        for (size_t i = 0; i < object_keys.size(); ++i) {
+            results.emplace_back(tl::unexpected(ErrorCode::INVALID_PARAMS));
+        }
+        return results;
+    }
+
+    if (query_results.size() != object_keys.size()) {
+        LOG(ERROR) << "Query results size (" << query_results.size()
+                   << ") doesn't match object keys size (" << object_keys.size()
+                   << ")";
+        std::vector<tl::expected<void, ErrorCode>> results;
+        results.reserve(object_keys.size());
+        for (size_t i = 0; i < object_keys.size(); ++i) {
+            results.emplace_back(tl::unexpected(ErrorCode::INVALID_PARAMS));
+        }
+        return results;
+    }
+
+    if (prefer_same_node) {
+        return BatchGetWhenPreferSameNode(object_keys, query_results, slices);
+    }
+
     auto t0_batch_get = std::chrono::steady_clock::now();
     std::vector<tl::expected<void, ErrorCode>> results;
     results.resize(object_keys.size());
@@ -878,6 +904,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
         std::vector<Replica::Descriptor> memory_replicas;
         std::vector<std::vector<Slice>> memory_slices;
         std::vector<size_t> memory_indices;
+        std::vector<bool> memory_cache_used;
 
         std::vector<Replica::Descriptor> disk_replicas;
         std::vector<std::vector<Slice>> disk_slices;
@@ -889,6 +916,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
 
             auto slices_it = slices.find(key);
             if (slices_it == slices.end()) {
+                LOG(ERROR) << "Slices not found for key: " << key;
                 results[i] = tl::unexpected(ErrorCode::INVALID_PARAMS);
                 continue;
             }
@@ -904,9 +932,17 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
             }
 
             if (replica.is_memory_replica()) {
+                bool cache_used = false;
+                if (hot_cache_ && replica.is_memory_replica()) {
+                    cache_used = RedirectToHotCache(key, replica);
+                    if (cache_used) {
+                        total_cache_hits++;
+                    }
+                }
                 memory_replicas.push_back(std::move(replica));
                 memory_slices.push_back(slices_it->second);
                 memory_indices.push_back(i);
+                memory_cache_used.push_back(cache_used);
             } else if (replica.is_disk_replica()) {
                 disk_replicas.push_back(std::move(replica));
                 disk_slices.push_back(slices_it->second);
@@ -920,57 +956,72 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
         if (!memory_replicas.empty()) {
             mem_future = transfer_submitter_->submit_batch(
                 memory_replicas, memory_slices, TransferRequest::READ);
-        }
-
-        if (!disk_replicas.empty()) {
-            disk_future = transfer_submitter_->submit_batch(
-                disk_replicas, disk_slices, TransferRequest::READ);
-        }
-
-        if (!memory_replicas.empty()) {
             if (!mem_future) {
                 LOG(ERROR) << "Failed to submit memory batch transfer for "
                            << memory_replicas.size() << " keys";
-                for (size_t idx : memory_indices) {
-                    results[idx] = tl::unexpected(ErrorCode::TRANSFER_FAIL);
-                }
-            } else {
-                ErrorCode mem_result = mem_future->get();
-                if (mem_result != ErrorCode::OK) {
-                    LOG(ERROR) << "Memory batch transfer failed";
-                    for (size_t idx : memory_indices) {
-                        results[idx] = tl::unexpected(mem_result);
+                for (size_t j = 0; j < memory_indices.size(); ++j) {
+                    if (hot_cache_ && memory_cache_used[j]) {
+                        hot_cache_->ReleaseHotKey(object_keys[memory_indices[j]]);
                     }
-                } else {
-                    VLOG(1) << "Memory batch transfer succeeded for "
-                             << memory_replicas.size() << " keys";
-                    for (size_t idx : memory_indices) {
-                        results[idx] = {};
-                    }
+                    results[memory_indices[j]] = tl::unexpected(ErrorCode::TRANSFER_FAIL);
                 }
             }
         }
 
         if (!disk_replicas.empty()) {
+            disk_future = transfer_submitter_->submit_batch(
+                disk_replicas, disk_slices, TransferRequest::READ);
             if (!disk_future) {
                 LOG(ERROR) << "Failed to submit disk batch transfer for "
                            << disk_replicas.size() << " keys";
                 for (size_t idx : disk_indices) {
                     results[idx] = tl::unexpected(ErrorCode::TRANSFER_FAIL);
                 }
+            }
+        }
+
+        if (!memory_replicas.empty() && mem_future) {
+            ErrorCode mem_result = mem_future->get();
+            if (mem_result != ErrorCode::OK) {
+                LOG(ERROR) << "Memory batch transfer failed";
+                for (size_t j = 0; j < memory_indices.size(); ++j) {
+                    if (hot_cache_ && memory_cache_used[j]) {
+                        hot_cache_->ReleaseHotKey(object_keys[memory_indices[j]]);
+                    }
+                    results[memory_indices[j]] = tl::unexpected(mem_result);
+                }
             } else {
-                ErrorCode disk_result = disk_future->get();
-                if (disk_result != ErrorCode::OK) {
-                    LOG(ERROR) << "Disk (NDS) batch transfer failed";
-                    for (size_t idx : disk_indices) {
-                        results[idx] = tl::unexpected(disk_result);
+                VLOG(1) << "Memory batch transfer succeeded for "
+                         << memory_replicas.size() << " keys";
+                for (size_t j = 0; j < memory_indices.size(); ++j) {
+                    auto idx = memory_indices[j];
+                    results[idx] = {};
+                    if (hot_cache_ && memory_cache_used[j]) {
+                        hot_cache_->ReleaseHotKey(object_keys[idx]);
                     }
-                } else {
-                    VLOG(1) << "Disk (NDS) batch transfer succeeded for "
-                             << disk_replicas.size() << " keys";
-                    for (size_t idx : disk_indices) {
-                        results[idx] = {};
+                    if (hot_cache_ && j < memory_replicas.size() &&
+                        j < memory_slices.size() &&
+                        ShouldAdmitToHotCache(object_keys[idx], memory_cache_used[j])) {
+                        ProcessSlicesAsync(object_keys[idx],
+                                           memory_slices[j],
+                                           memory_replicas[j]);
                     }
+                }
+            }
+        }
+
+        if (!disk_replicas.empty() && disk_future) {
+            ErrorCode disk_result = disk_future->get();
+            if (disk_result != ErrorCode::OK) {
+                LOG(ERROR) << "Disk (NDS) batch transfer failed";
+                for (size_t idx : disk_indices) {
+                    results[idx] = tl::unexpected(disk_result);
+                }
+            } else {
+                VLOG(1) << "Disk (NDS) batch transfer succeeded for "
+                         << disk_replicas.size() << " keys";
+                for (size_t idx : disk_indices) {
+                    results[idx] = {};
                 }
             }
         }
@@ -990,6 +1041,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
 
             auto slices_it = slices.find(key);
             if (slices_it == slices.end()) {
+                LOG(ERROR) << "Slices not found for key: " << key;
                 results[i] = tl::unexpected(ErrorCode::INVALID_PARAMS);
                 continue;
             }
@@ -1443,7 +1495,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
             if (r.is_disk_replica()) has_disk_replica = true;
         }
 
-bool all_transfers_submitted = true;
+        bool all_transfers_submitted = true;
         bool has_disk_replica = false;
         std::string failure_context;
         for (size_t replica_idx = 0; replica_idx < op.replicas.size();
@@ -1480,28 +1532,6 @@ bool all_transfers_submitted = true;
                 op.pending_transfers.emplace_back(
                     TransferFuture(std::make_shared<EmptyOperationState>()));
             }
-            VLOG(1) << "Successfully submitted "
-                    << op.pending_transfers.size()
-                    << " transfers for key " << op.key;
-        }
-    }
-
-                op.pending_transfers.emplace_back(
-                    std::move(submit_result.value()));
-            }
-        }
-
-        if (op.pending_transfers.empty() && has_disk_replica) {
-            op.pending_transfers.emplace_back(
-                TransferFuture(std::make_shared<EmptyOperationState>()));
-        }
-
-        if (!all_transfers_submitted) {
-            LOG(ERROR) << "Transfer submission failed for key " << op.key
-                       << ": " << failure_context;
-            op.SetError(ErrorCode::TRANSFER_FAIL, failure_context);
-            op.pending_transfers.clear();
-        } else {
             VLOG(1) << "Successfully submitted "
                     << op.pending_transfers.size()
                     << " transfers for key " << op.key;
