@@ -812,11 +812,11 @@ std::optional<TransferFuture> TransferSubmitter::submitFileReadOperation(
     auto state = std::make_shared<FilereadOperationState>();
 
     if (use_od_) {
-        FilereadTask task(true, replica.get_disk_descriptor().file_path,
-                          slices, state);
+        auto nds_key = ExtractKeyFromPath(replica.get_disk_descriptor().file_path);
+        FilereadTask task(true, nds_key, slices, state);
         fileread_pool_->submitTask(std::move(task));
         VLOG(1) << "NDS fileread transfer submitted to worker pool for key "
-                 << replica.get_disk_descriptor().file_path;
+                 << nds_key;
     } else {
         auto disk_replica = replica.get_disk_descriptor();
         std::string file_path = disk_replica.file_path;
@@ -838,7 +838,7 @@ std::optional<TransferFuture> TransferSubmitter::submitBatchFileReadOperation(
     std::vector<std::string> nds_keys;
     nds_keys.reserve(replicas.size());
     for (const auto& replica : replicas) {
-        nds_keys.push_back(replica.get_disk_descriptor().file_path);
+        nds_keys.push_back(ExtractKeyFromPath(replica.get_disk_descriptor().file_path));
     }
 
     BatchFilereadTask task(nds_keys, all_slices, state);
