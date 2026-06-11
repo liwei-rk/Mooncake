@@ -258,10 +258,6 @@ def run_correctness_test(args):
         global_segment_size = args.global_segment_size * MB
 
         print(">>> Initializing store")
-        mooncake.store.init_glog()
-        mooncake.store.set_vlog_level(2)
-        mooncake.store.set_log_to_stderr(True)
-
         mm = mmap.mmap(-1, total_buffer_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
         buf = np.frombuffer(mm, dtype=np.uint8, count=total_buffer_size)
         base_buf_ptr = buf.ctypes.data

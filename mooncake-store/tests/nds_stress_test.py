@@ -215,10 +215,6 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
             logger.warning("Worker {} failed to bind core {}: {}".format(
                 worker_idx, core_id, e))
 
-    mooncake.store.init_glog()
-    mooncake.store.set_vlog_level(0)
-    mooncake.store.set_log_to_stderr(True)
-
     mm = mmap.mmap(-1, buffer_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
     buf = np.frombuffer(mm, dtype=np.uint8, count=buffer_size)
     buf_ptr = buf.ctypes.data

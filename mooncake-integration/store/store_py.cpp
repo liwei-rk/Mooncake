@@ -1896,29 +1896,6 @@ PYBIND11_MODULE(store, m) {
         "Bind the current thread and memory allocation preference to the "
         "specified NUMA node");
 
-    m.def(
-        "init_glog",
-        [](const std::string& argv0 = "mooncake_store") {
-            google::InitGoogleLogging(argv0.c_str());
-        },
-        py::arg("argv0") = "mooncake_store",
-        "Initialize glog to enable VLOG/LOG output from C++ code");
-
-    m.def(
-        "set_vlog_level",
-        [](int level) {
-            FLAGS_v = level;
-        },
-        py::arg("level"),
-        "Set glog VLOG level (0=INFO, higher=more verbose)");
-
-    m.def(
-        "set_log_to_stderr",
-        [](bool enabled = true) {
-            FLAGS_logtostderr = enabled ? 1 : 0;
-        },
-        py::arg("enabled") = true,
-        "Set whether glog logs go to stderr instead of log files");
-}
+    }
 
 }  // namespace mooncake
