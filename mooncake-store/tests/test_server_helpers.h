@@ -99,6 +99,9 @@ class InProcMaster {
             if (config.use_od.has_value()) {
                 wms_cfg.use_od = config.use_od.value();
             }
+            if (config.nsid.has_value()) {
+                wms_cfg.nsid = config.nsid.value();
+            }
 
             wms_cfg.enable_cxl = config.enable_cxl.has_value()
                                      ? config.enable_cxl.value()
