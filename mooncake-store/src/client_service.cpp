@@ -1490,11 +1490,6 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
         if (op.IsResolved()) continue;
         if (op.replicas.empty()) continue;
 
-        bool has_disk_replica = false;
-        for (const auto& r : op.replicas) {
-            if (r.is_disk_replica()) has_disk_replica = true;
-        }
-
         bool all_transfers_submitted = true;
         bool has_disk_replica = false;
         std::string failure_context;
