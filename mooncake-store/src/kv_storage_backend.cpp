@@ -10,12 +10,12 @@ namespace mooncake {
 namespace {
 
 typedef int32_t (*NDS_init_fn)(void*, uint64_t, const char*);
-typedef int32_t (*NDS_isExists_fn)(const uint64_t*, const uint64_t*, size_t);
-typedef int32_t (*NDS_get_fn)(uint64_t, uint64_t, uint8_t*, size_t, size_t, uint32_t);
-typedef int32_t (*NDS_put_fn)(uint64_t, uint64_t, uint8_t*, size_t, size_t, uint32_t);
-typedef int32_t (*NDS_batchGet_fn)(const uint64_t*, const uint64_t*, uint8_t**,
+typedef int32_t (*NDS_isExists_fn)(const uint64_t*, size_t, uint32_t);
+typedef int32_t (*NDS_get_fn)(uint64_t, uint8_t*, size_t, size_t, uint32_t);
+typedef int32_t (*NDS_put_fn)(uint64_t, uint8_t*, size_t, size_t, uint32_t);
+typedef int32_t (*NDS_batchGet_fn)(const uint64_t*, uint8_t**,
                                    const size_t*, const size_t*, const uint32_t*, size_t);
-typedef int32_t (*NDS_batchPut_fn)(const uint64_t*, const uint64_t*, uint8_t**,
+typedef int32_t (*NDS_batchPut_fn)(const uint64_t*, uint8_t**,
                                    const size_t*, const size_t*, const uint32_t*, size_t);
 
 struct NDSLoader {
@@ -200,8 +200,7 @@ void KVStorageBackend::CleanupNDS() {
 tl::expected<std::vector<std::string>, ErrorCode> KVStorageBackend::StoreObjects(
     const std::vector<std::string>& keys,
     const std::vector<std::vector<Slice>>& batched_slices) {
-    std::vector<uint64_t> keyHighs;
-    std::vector<uint64_t> keyLows;
+    std::vector<uint64_t> blockIds;
     std::vector<uint8_t*> blockAddrs;
     std::vector<size_t> nds_offsets;
     std::vector<size_t> nds_lengths;
@@ -233,22 +232,19 @@ tl::expected<std::vector<std::string>, ErrorCode> KVStorageBackend::StoreObjects
             return tl::unexpected(ErrorCode::INVALID_PARAMS);
         }
 
-        keyHighs.push_back(0);
-        keyLows.push_back(blockId);
+        blockIds.push_back(blockId);
         blockAddrs.push_back(reinterpret_cast<uint8_t*>(slices[0].ptr));
         nds_offsets.push_back(0);
         nds_lengths.push_back(total_slice_size);
     }
 
     auto& loader = NDSLoader::Instance();
-    std::vector<uint32_t> nsids(keyLows.size(), nsid_);
-    int32_t result = loader.batchPut(keyHighs.data(), keyLows.data(),
+    std::vector<uint32_t> nsids(blockIds.size(), nsid_);
+    int32_t result = loader.batchPut(blockIds.data(),
                                      blockAddrs.data(), nds_offsets.data(),
                                      nds_lengths.data(), nsids.data(),
-                                     keyLows.size());
+                                     blockIds.size());
     if (result != 0) {
-        // LOG(ERROR) << "NDS batchPut failed: " << result
-        //            << " for " << blockIds.size() << " slices";
         return tl::unexpected(ErrorCode::WRITE_FAIL);
     }
 
@@ -258,8 +254,7 @@ tl::expected<std::vector<std::string>, ErrorCode> KVStorageBackend::StoreObjects
 tl::expected<void, ErrorCode> KVStorageBackend::LoadObjects(
     const std::vector<std::string>& keys,
     const std::vector<std::vector<Slice>>& batched_slices) {
-    std::vector<uint64_t> keyHighs;
-    std::vector<uint64_t> keyLows;
+    std::vector<uint64_t> blockIds;
     std::vector<uint8_t*> blockAddrs;
     std::vector<size_t> nds_offsets;
     std::vector<size_t> nds_lengths;
@@ -291,22 +286,19 @@ tl::expected<void, ErrorCode> KVStorageBackend::LoadObjects(
             return tl::unexpected(ErrorCode::INVALID_PARAMS);
         }
 
-        keyHighs.push_back(0);
-        keyLows.push_back(blockId);
+        blockIds.push_back(blockId);
         blockAddrs.push_back(reinterpret_cast<uint8_t*>(slices[0].ptr));
         nds_offsets.push_back(0);
         nds_lengths.push_back(total_slice_size);
     }
 
     auto& loader = NDSLoader::Instance();
-    std::vector<uint32_t> nsids(keyLows.size(), nsid_);
-    int32_t result = loader.batchGet(keyHighs.data(), keyLows.data(),
+    std::vector<uint32_t> nsids(blockIds.size(), nsid_);
+    int32_t result = loader.batchGet(blockIds.data(),
                                      blockAddrs.data(), nds_offsets.data(),
                                      nds_lengths.data(), nsids.data(),
-                                     keyLows.size());
+                                     blockIds.size());
     if (result != 0) {
-        // LOG(ERROR) << "NDS batchGet failed: " << result
-        //            << " for " << blockIds.size() << " slices";
         return tl::unexpected(ErrorCode::FILE_READ_FAIL);
     }
 
