@@ -72,7 +72,6 @@ LMCACHE_CONFIG_FILE="${CONFIG_FILE}" \
 vllm serve "${MODEL_PATH}" \
     --port ${DECODER_VLLM_PORT} \
     --tensor-parallel-size ${DECODER_TP_SIZE} \
-    --disable-log-requests \
     --enforce-eager \
     --no-enable-prefix-caching \
     --kv-transfer-config \
