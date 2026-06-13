@@ -6,7 +6,8 @@ set -e
 
 # === 核心变量 (必改) ===
 MODEL_PATH="/path/to/your/model"       # 模型文件路径
-PREFILLER_NPU_ID=1                     # Prefiller NPU ID
+PREFILLER_NPU_IDS="0,1,2,3"           # Prefiller NPU IDs (逗号分隔, 对应 ASCEND_RT_VISIBLE_DEVICES)
+PREFILLER_TP_SIZE=4                    # Prefiller tensor-parallel size (须与 NPU 数量一致)
 PREFILLER_VLLM_PORT=7100               # vLLM 服务端口
 MASTER_HOST="localhost"
 MASTER_PORT=50051
@@ -29,7 +30,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/configs/lmcache-prefiller-config.yaml"
 
 # NPU 设备隔离
-export ASCEND_RT_VISIBLE_DEVICES="${PREFILLER_NPU_ID}"
+export ASCEND_RT_VISIBLE_DEVICES="${PREFILLER_NPU_IDS}"
 
 # NDS 环境变量
 export NDS_LIBRARY_PATH="${NDS_LIBRARY_PATH:-libndskv.so}"
@@ -60,7 +61,7 @@ case "${RDMA_STRATEGY}" in
         ;;
 esac
 
-echo "=== Starting Prefiller (kv_producer) on NPU ${PREFILLER_NPU_ID} ==="
+echo "=== Starting Prefiller (kv_producer) on NPUs ${PREFILLER_NPU_IDS} (tp=${PREFILLER_TP_SIZE}) ==="
 echo "Model: ${MODEL_PATH}"
 echo "Port: ${PREFILLER_VLLM_PORT}"
 echo "LMCache config: ${CONFIG_FILE}"
@@ -70,6 +71,7 @@ echo "MOONCAKE_DEVICE: ${MOONCAKE_DEVICE}"
 LMCACHE_CONFIG_FILE="${CONFIG_FILE}" \
 vllm serve "${MODEL_PATH}" \
     --port ${PREFILLER_VLLM_PORT} \
+    --tensor-parallel-size ${PREFILLER_TP_SIZE} \
     --disable-log-requests \
     --enforce-eager \
     --no-enable-prefix-caching \

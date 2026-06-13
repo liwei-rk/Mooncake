@@ -6,7 +6,8 @@ set -e
 
 # === 核心变量 (必改) ===
 MODEL_PATH="/path/to/your/model"       # 模型文件路径
-DECODER_NPU_ID=2                       # Decoder NPU ID
+DECODER_NPU_IDS="4,5,6,7"             # Decoder NPU IDs (逗号分隔, 对应 ASCEND_RT_VISIBLE_DEVICES)
+DECODER_TP_SIZE=4                      # Decoder tensor-parallel size (须与 NPU 数量一致)
 DECODER_VLLM_PORT=7200                 # vLLM 服务端口
 MASTER_HOST="localhost"
 MASTER_PORT=50051
@@ -29,7 +30,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/configs/lmcache-decoder-config.yaml"
 
 # NPU 设备隔离
-export ASCEND_RT_VISIBLE_DEVICES="${DECODER_NPU_ID}"
+export ASCEND_RT_VISIBLE_DEVICES="${DECODER_NPU_IDS}"
 
 # NDS 环境变量
 export NDS_LIBRARY_PATH="${NDS_LIBRARY_PATH:-libndskv.so}"
@@ -60,7 +61,7 @@ case "${RDMA_STRATEGY}" in
         ;;
 esac
 
-echo "=== Starting Decoder (kv_consumer) on NPU ${DECODER_NPU_ID} ==="
+echo "=== Starting Decoder (kv_consumer) on NPUs ${DECODER_NPU_IDS} (tp=${DECODER_TP_SIZE}) ==="
 echo "Model: ${MODEL_PATH}"
 echo "Port: ${DECODER_VLLM_PORT}"
 echo "LMCache config: ${CONFIG_FILE}"
@@ -70,6 +71,7 @@ echo "MOONCAKE_DEVICE: ${MOONCAKE_DEVICE}"
 LMCACHE_CONFIG_FILE="${CONFIG_FILE}" \
 vllm serve "${MODEL_PATH}" \
     --port ${DECODER_VLLM_PORT} \
+    --tensor-parallel-size ${DECODER_TP_SIZE} \
     --disable-log-requests \
     --enforce-eager \
     --no-enable-prefix-caching \

@@ -12,11 +12,11 @@
         ▼
   PD Proxy (mooncake_pd_proxy.py)
         │
-        ├──► Prefiller (kv_producer, NPU ${PREFILLER_NPU_ID})
+        ├──► Prefiller (kv_producer, NPUs 0,1,2,3, tp=4)
         │      vLLM + LMCache → 存储 KVCache → Mooncake NDS
         │      max_tokens=1, 仅做 prefill + KV 存储
         │
-        └──► Decoder (kv_consumer, NPU ${DECODER_NPU_ID})
+        └──► Decoder (kv_consumer, NPUs 4,5,6,7, tp=4)
                vLLM + LMCache → 检索 KVCache ← Mooncake NDS
                前缀命中 → 跳过 prefill → 低 TTFT
                前缀未命中 → 全量 prefill → 高 TTFT
@@ -46,7 +46,7 @@
 - `libndskv.so` + `nds_config.conf` (NDS 盘框库和配置)
 - vLLM (Ascend NPU 版)
 - LMCache (`pip install lmcache`)
-- 2+ NPU
+- 4+ NPU (Prefiller 4卡 TP + Decoder 4卡 TP, 共8卡)
 - Python 3.10+, httpx, fastapi, uvicorn
 
 ## 5. 可配置变量
@@ -56,8 +56,10 @@
 ```bash
 # === 核心变量 ===
 MODEL_PATH="/path/to/your/model"       # 模型文件路径 (必改)
-PREFILLER_NPU_ID=1                     # Prefiller 占用 NPU ID
-DECODER_NPU_ID=2                       # Decoder 占用 NPU ID
+PREFILLER_NPU_IDS="0,1,2,3"              # Prefiller 占用 NPU IDs (逗号分隔)
+DECODER_NPU_IDS="4,5,6,7"                # Decoder 占用 NPU IDs (逗号分隔)
+PREFILLER_TP_SIZE=4                       # Prefiller tensor-parallel size
+DECODER_TP_SIZE=4                         # Decoder tensor-parallel size
 
 # === 网络变量 ===
 MASTER_HOST="localhost"                 # Mooncake Master 主机地址
@@ -192,7 +194,7 @@ python run_benchmark.py \
 # 2. 编辑变量:
 #    - 修改 start_prefiller.sh 中的 MODEL_PATH
 #    - 修改 start_decoder.sh 中的 MODEL_PATH
-#    - 修改 PREFILLER_NPU_ID / DECODER_NPU_ID (如需)
+#    - 修改 PREFILLER_NPU_IDS / DECODER_NPU_IDS (如需)
 #    - 修改 nds_config.conf 为实际盘框配置
 #    - 修改 configs/ 中的 YAML 中的 MASTER_HOST (如跨节点)
 #    - RDMA 配置:
@@ -253,7 +255,7 @@ bash cleanup.sh
 | **nsid 下发** | nsid 由 Master RPC 自动下发到 Client, 不需要客户端设置 `MC_NDS_NSID` 环境变量 |
 | **`save_chunk_meta: false`** | 零拷贝模式, 不存 TensorMetadata 前缀, LMCache 传 raw bytes |
 | **`PYTHONHASHSEED=0`** | Prefiller 和 Decoder 必须相同, 确保 KVCache hash 一致 |
-| **`ASCEND_RT_VISIBLE_DEVICES`** | NPU 设备隔离, 两个实例必须使用不同 NPU ID |
+| **`ASCEND_RT_VISIBLE_DEVICES`** | NPU 设备隔离, 逗号分隔多卡 ID (如 "0,1,2,3"), 需配合 `--tensor-parallel-size` |
 | **Proxy `max_tokens=1`** | Prefiller 仅做 prefill + KV 存储, 不浪费生成时间 |
 | **`protocol: "rdma"`** | LMCache YAML 中协议为 RDMA, 需配合 RDMA 设备配置 |
 | **`device_name: ""`** | RDMA 设备名留空时, 由 `MOONCAKE_DEVICE` 环境变量或自动发现填充 |
