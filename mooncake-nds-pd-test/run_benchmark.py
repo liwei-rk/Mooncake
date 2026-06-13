@@ -362,11 +362,10 @@ async def main():
 
     # Determine target URL based on mode
     if args.mode == "proxy":
-        target_url = f"{args.proxy_url}/v1"
+        target_url = f"{args.proxy_url}/v1/completions"
         prefiller_url = args.prefiller_url
     else:
-        # Direct mode: target is decoder directly
-        target_url = f"{args.decoder_url}/v1"
+        target_url = f"{args.decoder_url}/v1/completions"
         prefiller_url = args.prefiller_url
 
     print(f"{'='*60}")
@@ -382,10 +381,11 @@ async def main():
     # Wait for target to be ready
     print("\nWaiting for services to be ready...")
     health_url = args.proxy_url if args.mode == "proxy" else args.decoder_url
+    health_path = "/health" if args.mode == "proxy" else "/v1/models"
     for attempt in range(30):
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.get(f"{health_url}/v1/models")
+                r = await client.get(f"{health_url}{health_path}")
                 if r.status_code == 200:
                     print("Services are ready.")
                     break
