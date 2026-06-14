@@ -64,7 +64,7 @@ async def measure_ttft_streaming(
     completion_tokens = 0
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream("POST", url, json=payload) as response:
-            for line in response.aiter_lines():
+            async for line in response.aiter_lines():
                 if not line or not line.startswith("data: "):
                     continue
                 data_str = line[len("data: "):]
