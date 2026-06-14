@@ -4,16 +4,15 @@
 #
 # Architecture based on vLLM's load_balance_proxy_server_example.py:
 #   1. Client sends request to proxy
-#   2. Proxy sends to Prefiller (max_tokens=1, stream=False) → stores KV to Mooncake
+#   2. Proxy sends to Prefiller (max_tokens=1, stream=False) -> stores KV to Mooncake
 #   3. Proxy extracts kv_transfer_params from prefiller response
-#   4. Proxy forwards to Decoder (stream=True) → retrieves KV from Mooncake → generates output
+#   4. Proxy forwards to Decoder (stream=True) -> retrieves KV from Mooncake -> generates output
 #   5. Decoder's streamed response is forwarded to client
 #
 # Key difference from naive proxy: Prefiller only does prefill + KV store,
 # NOT full generation. This eliminates wasted prefiller generation time.
 
 import argparse
-import asyncio
 import json
 import os
 import uuid
@@ -29,8 +28,15 @@ PREFILLER_URL = "http://localhost:7100/v1"
 DECODER_URL = "http://localhost:7200/v1"
 
 
+def _build_headers(request_id: str) -> dict:
+    headers = {"X-Request-Id": request_id}
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
 async def send_to_prefiller(req_data: dict, request_id: str):
-    """Send request to prefiller: max_tokens=1, stream=False, with kv_transfer_params."""
     prefill_req = req_data.copy()
     prefill_req["stream"] = False
     prefill_req["max_tokens"] = 1
@@ -47,10 +53,7 @@ async def send_to_prefiller(req_data: dict, request_id: str):
         "remote_host": None,
         "remote_port": None,
     }
-    headers = {
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '')}",
-        "X-Request-Id": request_id,
-    }
+    headers = _build_headers(request_id)
     async with httpx.AsyncClient(timeout=300) as client:
         try:
             resp = await client.post(
@@ -64,7 +67,6 @@ async def send_to_prefiller(req_data: dict, request_id: str):
 
 
 async def send_to_prefiller_chat(req_data: dict, request_id: str):
-    """Send chat request to prefiller."""
     prefill_req = req_data.copy()
     prefill_req["stream"] = False
     prefill_req["max_tokens"] = 1
@@ -81,10 +83,7 @@ async def send_to_prefiller_chat(req_data: dict, request_id: str):
         "remote_host": None,
         "remote_port": None,
     }
-    headers = {
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '')}",
-        "X-Request-Id": request_id,
-    }
+    headers = _build_headers(request_id)
     async with httpx.AsyncClient(timeout=300) as client:
         try:
             resp = await client.post(
@@ -103,38 +102,32 @@ async def proxy_completions(request: Request):
     req_data = await request.json()
     stream_flag = bool(req_data.get("stream", False))
 
-    # Step 1: Prefiller (prefill + KV store to Mooncake)
     prefill_resp = await send_to_prefiller(req_data, request_id)
     if prefill_resp is None:
         return JSONResponse({"error": "Prefiller request failed"}, status_code=500)
 
-    # Extract kv_transfer_params from prefiller response
     kv_transfer_params = prefill_resp.get("kv_transfer_params", {})
     decode_req = req_data.copy()
     if kv_transfer_params:
         decode_req["kv_transfer_params"] = kv_transfer_params
 
-    # Step 2: Decoder (retrieve KV from Mooncake + generate output)
-    headers = {
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '')}",
-        "X-Request-Id": request_id,
-    }
+    headers = _build_headers(request_id)
 
     if stream_flag:
-        async with httpx.AsyncClient(timeout=300) as client:
-            async def stream_decoder():
-                with client.stream(
+        async def stream_decoder():
+            async with httpx.AsyncClient(timeout=300) as client:
+                async with client.stream(
                     "POST",
                     f"{DECODER_URL}/completions",
                     json=decode_req,
                     headers=headers,
                 ) as stream:
-                    for chunk in stream.iter_bytes():
+                    async for chunk in stream.aiter_bytes():
                         yield chunk
 
-            return StreamingResponse(
-                stream_decoder(), media_type="text/event-stream"
-            )
+        return StreamingResponse(
+            stream_decoder(), media_type="text/event-stream"
+        )
     else:
         async with httpx.AsyncClient(timeout=300) as client:
             try:
@@ -154,7 +147,6 @@ async def proxy_chat_completions(request: Request):
     req_data = await request.json()
     stream_flag = bool(req_data.get("stream", False))
 
-    # Step 1: Prefiller
     prefill_resp = await send_to_prefiller_chat(req_data, request_id)
     if prefill_resp is None:
         return JSONResponse({"error": "Prefiller request failed"}, status_code=500)
@@ -164,27 +156,23 @@ async def proxy_chat_completions(request: Request):
     if kv_transfer_params:
         decode_req["kv_transfer_params"] = kv_transfer_params
 
-    # Step 2: Decoder
-    headers = {
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '')}",
-        "X-Request-Id": request_id,
-    }
+    headers = _build_headers(request_id)
 
     if stream_flag:
-        async with httpx.AsyncClient(timeout=300) as client:
-            async def stream_decoder():
-                with client.stream(
+        async def stream_decoder():
+            async with httpx.AsyncClient(timeout=300) as client:
+                async with client.stream(
                     "POST",
                     f"{DECODER_URL}/chat/completions",
                     json=decode_req,
                     headers=headers,
                 ) as stream:
-                    for chunk in stream.iter_bytes():
+                    async for chunk in stream.aiter_bytes():
                         yield chunk
 
-            return StreamingResponse(
-                stream_decoder(), media_type="text/event-stream"
-            )
+        return StreamingResponse(
+            stream_decoder(), media_type="text/event-stream"
+        )
     else:
         async with httpx.AsyncClient(timeout=300) as client:
             try:
@@ -241,6 +229,6 @@ if __name__ == "__main__":
     print(f"PD Proxy started on {args.host}:{args.port}")
     print(f"  Prefiller: {PREFILLER_URL}")
     print(f"  Decoder:   {DECODER_URL}")
-    print(f"  Flow: Prefiller(max_tokens=1) → Decoder(stream)")
+    print(f"  Flow: Prefiller(max_tokens=1) -> Decoder(stream)")
 
     uvicorn.run(app, host=args.host, port=args.port)

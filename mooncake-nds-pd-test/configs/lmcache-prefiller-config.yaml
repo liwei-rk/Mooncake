@@ -1,5 +1,5 @@
 chunk_size: 256
-local_cpu: False
+local_cpu: True
 max_local_cpu_size: 2
 
 remote_url: "mooncakestore://localhost:50051/"
@@ -9,7 +9,7 @@ retrieve_locations: ["RemoteBackend"]
 extra_config:
   local_hostname: "prefiller-host"
   metadata_server: "http://localhost:8005/metadata"
-  protocol: "mooncake_channel"
+  protocol: "rdma"
   device_name: ""
   master_server_address: "localhost:50051"
   global_segment_size: 0

@@ -5,7 +5,7 @@
 set -e
 
 # === 核心变量 (必改) ===
-MODEL_PATH="/path/to/your/model"       # 模型文件路径
+MODEL_PATH="/home/models/Qwen2.5-7B"       # 模型文件路径
 PREFILLER_NPU_IDS="0,1,2,3"           # Prefiller NPU IDs (逗号分隔, 对应 ASCEND_RT_VISIBLE_DEVICES)
 PREFILLER_TP_SIZE=4                    # Prefiller tensor-parallel size (须与 NPU 数量一致)
 PREFILLER_VLLM_PORT=7100               # vLLM 服务端口
@@ -75,4 +75,4 @@ vllm serve "${MODEL_PATH}" \
     --enforce-eager \
     --no-enable-prefix-caching \
     --kv-transfer-config \
-    '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer"}'
+    '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_producer"}'
