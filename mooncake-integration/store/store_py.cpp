@@ -8,6 +8,7 @@
 #include "types.h"
 
 #include <cstdlib>  // for atexit
+#include <glog/logging.h>
 
 #include "integration_utils.h"
 
@@ -1894,6 +1895,7 @@ PYBIND11_MODULE(store, m) {
         py::arg("node"),
         "Bind the current thread and memory allocation preference to the "
         "specified NUMA node");
-}
+
+    }
 
 }  // namespace mooncake

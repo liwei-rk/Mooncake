@@ -53,6 +53,8 @@ MasterService::MasterService(const MasterServiceConfig& config)
       global_file_segment_size_(config.global_file_segment_size),
       enable_disk_eviction_(config.enable_disk_eviction),
       quota_bytes_(config.quota_bytes),
+      use_od_(config.use_od),
+      nsid_(config.nsid),
       segment_manager_(config.memory_allocator, config.enable_cxl),
       memory_allocator_type_(config.memory_allocator),
       allocation_strategy_(
@@ -134,6 +136,14 @@ MasterService::MasterService(const MasterServiceConfig& config)
         use_disk_replica_ = true;
         MasterMetricManager::instance().inc_total_file_capacity(
             global_file_segment_size_);
+    }
+    if (use_od_) {
+        if (nsid_ == 0) {
+            LOG(WARNING) << "use_od=true but nsid=0. "
+                            "Disk replica is disabled.";
+        } else {
+            use_disk_replica_ = true;
+        }
     }
 
     if (enable_snapshot_) {
@@ -748,11 +758,15 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
 
     // If disk replica is enabled, allocate a disk replica
     if (use_disk_replica_) {
-        // Allocate a file path for the disk replica
-        std::string file_path =
-            ResolvePathFromKey(key, root_fs_dir_, cluster_id_);
-        replicas.emplace_back(file_path, total_length,
-                              ReplicaStatus::PROCESSING);
+        if (!root_fs_dir_.empty()) {
+            std::string file_path =
+                ResolvePathFromKey(key, root_fs_dir_, cluster_id_);
+            replicas.emplace_back(file_path, total_length,
+                                  ReplicaStatus::PROCESSING);
+        } else {
+            replicas.emplace_back("", total_length,
+                                  ReplicaStatus::PROCESSING);
+        }
     }
 
     std::vector<Replica::Descriptor> replica_list;
@@ -932,12 +946,28 @@ std::vector<tl::expected<void, ErrorCode>> MasterService::BatchPutEnd(
     return results;
 }
 
+std::vector<tl::expected<void, ErrorCode>> MasterService::BatchPutEndDisk(
+    const UUID& client_id, const std::vector<std::string>& keys) {
+    std::vector<tl::expected<void, ErrorCode>> results;
+    results.reserve(keys.size());
+    for (const auto& key : keys) {
+        results.emplace_back(PutEnd(client_id, key, ReplicaType::DISK));
+    }
+    return results;
+}
+
 std::vector<tl::expected<void, ErrorCode>> MasterService::BatchPutRevoke(
     const UUID& client_id, const std::vector<std::string>& keys) {
     std::vector<tl::expected<void, ErrorCode>> results;
     results.reserve(keys.size());
     for (const auto& key : keys) {
-        results.emplace_back(PutRevoke(client_id, key, ReplicaType::MEMORY));
+        auto mem_result = PutRevoke(client_id, key, ReplicaType::MEMORY);
+        auto disk_result = PutRevoke(client_id, key, ReplicaType::DISK);
+        if (!mem_result && !disk_result) {
+            results.emplace_back(mem_result);
+        } else {
+            results.emplace_back();
+        }
     }
     return results;
 }
@@ -1605,10 +1635,11 @@ MasterService::GetStorageConfig() const {
             << "Storage root directory or cluster ID is not set. persisting "
                "data is disabled.";
         return GetStorageConfigResponse("", enable_disk_eviction_,
-                                        quota_bytes_);
+                                        quota_bytes_, use_od_, nsid_);
     }
     std::string fsdir = root_fs_dir_ + "/" + cluster_id_;
-    return GetStorageConfigResponse(fsdir, enable_disk_eviction_, quota_bytes_);
+    return GetStorageConfigResponse(fsdir, enable_disk_eviction_, quota_bytes_,
+                                    use_od_, nsid_);
 }
 
 auto MasterService::MountLocalDiskSegment(const UUID& client_id,
