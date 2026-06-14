@@ -88,7 +88,7 @@ async def measure_ttft_streaming(
                         first_token_time = time.monotonic()
                     full_text += content
                     completion_tokens += 1
-                usage = chunk.get("usage", {})
+                usage = chunk.get("usage") or {}
                 if usage.get("completion_tokens"):
                     completion_tokens = usage["completion_tokens"]
     end = time.monotonic()
