@@ -779,8 +779,26 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGetWhenPreferSameNode(
             continue;
         }
         if (!replica.is_memory_replica()) {
+            LOG(ERROR) << "[BatchGetSameNode] key=" << key
+                       << " selected_replica is NOT memory, type="
+                       << (replica.is_disk_replica() ? "DISK" :
+                           replica.is_local_disk_replica() ? "LOCAL_DISK" : "UNKNOWN")
+                       << " -> INVALID_REPLICA";
             results[i] = tl::unexpected(ErrorCode::INVALID_REPLICA);
             continue;
+        }
+
+        LOG(INFO) << "[BatchGetSameNode] key=" << key
+                  << " replicas_count=" << replica_list.size()
+                  << " selected=MEMORY";
+        for (size_t r = 0; r < replica_list.size(); ++r) {
+            std::string type_str = "UNKNOWN";
+            if (replica_list[r].is_memory_replica()) type_str = "MEMORY";
+            else if (replica_list[r].is_disk_replica()) type_str = "DISK";
+            else if (replica_list[r].is_local_disk_replica()) type_str = "LOCAL_DISK";
+            LOG(INFO) << "[BatchGetSameNode] key=" << key
+                      << " replica[" << r << "] type=" << type_str
+                      << " status=" << static_cast<int>(replica_list[r].status);
         }
 
         bool cache_used = false;
@@ -890,6 +908,10 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
         }
         return results;
     }
+
+    LOG(INFO) << "[BatchGet] prefer_same_node=" << prefer_same_node
+              << " use_od=" << use_od_
+              << " keys_count=" << object_keys.size();
 
     if (prefer_same_node) {
         return BatchGetWhenPreferSameNode(object_keys, query_results, slices);
