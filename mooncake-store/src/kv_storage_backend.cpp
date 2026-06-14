@@ -45,7 +45,16 @@ struct NDSLoader {
         const char* env_config = std::getenv("MC_NDS_CONFIG");
         nds_config_path = env_config ? env_config : "nds_config.conf";
 
-        handle = dlopen(lib_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+        const char* env_dep_path = std::getenv("NDS_DEP_LIBRARY_PATH");
+        if (env_dep_path) {
+            void* dep_handle = dlopen(env_dep_path, RTLD_NOW | RTLD_GLOBAL);
+            if (!dep_handle) {
+                LOG(WARNING) << "Failed to load NDS dependency " << env_dep_path
+                             << ": " << dlerror() << " (continuing anyway)";
+            }
+        }
+
+        handle = dlopen(lib_path.c_str(), RTLD_NOW | RTLD_GLOBAL);
         if (!handle) {
             LOG(ERROR) << "Failed to load " << lib_path << ": " << dlerror();
             return false;
