@@ -74,15 +74,17 @@ async def measure_ttft_streaming(
                     chunk = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
-                choices = chunk.get("choices", [])
+                if not isinstance(chunk, dict):
+                    continue
+                choices = chunk.get("choices") or []
                 if not choices:
                     continue
                 choice = choices[0]
                 content = ""
-                delta = choice.get("delta", {})
-                message = choice.get("message", {})
-                text_content = choice.get("text", "")
-                content = delta.get("content", "") or message.get("content", "") or text_content
+                delta = choice.get("delta") or {}
+                message = choice.get("message") or {}
+                text_content = choice.get("text") or ""
+                content = delta.get("content") or message.get("content") or text_content
                 if content:
                     if first_token_time is None:
                         first_token_time = time.monotonic()
