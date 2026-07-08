@@ -101,6 +101,10 @@ def start_master(args):
     http_port = find_free_port()
     metrics_port = find_free_port()
 
+    nsid = args.nsid
+    if nsid is None:
+        nsid = int(os.environ.get("OD_KV_NSID", "1"))
+
     master_log_fd, master_log_path = tempfile.mkstemp(
         prefix="nds_stress_master-", suffix=".log")
     os.close(master_log_fd)
@@ -109,7 +113,7 @@ def start_master(args):
     cmd = [
         master_binary,
         "--use_od=true",
-        "--nsid=1",
+        "--nsid={}".format(nsid),
         "--cluster_id=nds_stress",
         "--enable_http_metadata_server=true",
         "--rpc_address=127.0.0.1",
@@ -494,6 +498,8 @@ def parse_args():
                         help="Start CPU core for binding (-1 to disable)")
     parser.add_argument("--master-binary", type=str, default="",
                         help="Path to mooncake_master binary (auto-detect if empty)")
+    parser.add_argument("--nsid", type=int, default=None,
+                        help="Namespace ID for NDS (0 to disable)")
     return parser.parse_args()
 
 

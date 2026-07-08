@@ -21,6 +21,7 @@ DEFINE_string(protocol, "tcp", "Transfer protocol: rdma|tcp");
 DEFINE_string(device_name, "", "Device name to use, valid if protocol=rdma");
 DEFINE_uint64(default_kv_lease_ttl, mooncake::DEFAULT_DEFAULT_KV_LEASE_TTL,
               "Default lease time for kv objects");
+DEFINE_uint32(nsid, 0, "Namespace ID for NDS");
 
 namespace mooncake {
 namespace testing {
@@ -42,6 +43,8 @@ class NdsClientTest : public ::testing::Test {
 
         if (getenv("PROTOCOL")) FLAGS_protocol = getenv("PROTOCOL");
         if (getenv("DEVICE_NAME")) FLAGS_device_name = getenv("DEVICE_NAME");
+        if (getenv("OD_KV_NSID"))
+            FLAGS_nsid = static_cast<uint32_t>(std::stoul(getenv("OD_KV_NSID")));
 
         if (getenv("DEFAULT_KV_LEASE_TTL")) {
             default_kv_lease_ttl_ = std::stoul(getenv("DEFAULT_KV_LEASE_TTL"));
@@ -57,6 +60,7 @@ class NdsClientTest : public ::testing::Test {
                           .set_root_fs_dir(tmp_dir_.string())
                           .set_enable_disk_eviction(true)
                           .set_use_od(true)
+                          .set_nsid(FLAGS_nsid)
                           .build();
         ASSERT_TRUE(master_.Start(config));
         master_address_ = master_.master_address();
