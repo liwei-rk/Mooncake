@@ -301,25 +301,35 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
                         alive_order.append(slot)
                 elif operation_mode == "batch_get":
                     # 【核心改动】给读进程加个弹簧，失败了别秒报
-                    for retry in range(50):
+                    backoff_delay = 0.001  # 初始睡 1 毫秒
+                    for retry in range(25):
                         ret_codes = store.batch_get_into(batch_keys, buffer_ptrs, sizes)
                         all_success = all(rc > 0 for rc in ret_codes)
                         if all_success:
                             break
-                        time.sleep(0.002) # 睡 2 毫秒，给写进程完成 Finalize 和TransferEngine留时间
+                        
+                        # 没读到账本，说明写进程还在路上，老老实实交出 CPU 睡觉
+                        time.sleep(backoff_delay)
+                        
+                        # 【核心】时间指数级翻倍（1ms -> 2ms -> 4ms...），但上限封顶在 15 毫秒，防止睡死
+                        backoff_delay = min(backoff_delay * 2, 0.015)
+                        # time.sleep(0.002) # 睡 2 毫秒，给写进程完成 Finalize 和TransferEngine留时间
                 latency = time.time() - start_time
 
-                if operation_mode == "batch_put" and eviction_window > 0:
-                    while len(alive_slots) > eviction_window:
-                        oldest_slot = alive_order[0]
-                        _remove_slot(store, worker_idx, oldest_slot)
-                        alive_order.pop(0)
-                        del alive_slots[oldest_slot]
+                # if operation_mode == "batch_put" and eviction_window > 0:
+                #     while len(alive_slots) > eviction_window:
+                #         oldest_slot = alive_order[0]
+                #         _remove_slot(store, worker_idx, oldest_slot)
+                #         alive_order.pop(0)
+                #         del alive_slots[oldest_slot]
 
                 iteration += 1
 
+                # 不管是读还是写，只要失败，有效传输字节一律归零
+                actual_bytes = total_batch_bytes if all_success else 0
+
                 stats_queue.put((MSG_BATCH_RESULT, worker_idx, all_success,
-                                 total_batch_bytes, latency))
+                                 actual_bytes, latency))
 
                 if not all_success:
                     failed_count = sum(1 for rc in ret_codes
@@ -473,8 +483,8 @@ def parse_args():
     parser.add_argument("--operation-mode", type=str, default="batch_put",
                         choices=["batch_put", "batch_get", "mixed"],
                         help="Operation mode: batch_put, batch_get, or mixed")
-    parser.add_argument("--block-size", type=int, default=128 * 1024,
-                        help="Size of a single block in bytes")
+    parser.add_argument("--block-size", type=int, default=32 * 1024 * 1024,
+                    help="Size of a single block in bytes")
     parser.add_argument("--batch-size", type=int, default=128,
                         help="Number of keys per batch operation")
     parser.add_argument("--num-workers", type=int, default=8,
