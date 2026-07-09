@@ -254,8 +254,12 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
 
     stats_queue.put((MSG_SETUP_OK, worker_idx, 0))
 
+    # 【新增改动】核心逻辑：如果是读操作，就去读前一个写进程写入的 Key (1读0, 3读2)，原来没这行只会读worker_idx
+    target_idx = worker_idx - 1 if operation_mode == "batch_get" else worker_idx
+
     num_slots = depth if depth > 0 else 1
-    slot_keys = [generate_batch_keys(worker_idx, s, batch_size)
+    #  这里原来是 slot_keys = [generate_batch_keys(worker_idx, s, batch_size)
+    slot_keys = [generate_batch_keys(target_idx, s, batch_size)
                  for s in range(num_slots)]
     alive_slots = {}
     alive_order = []
@@ -271,8 +275,9 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
                     batch_keys = slot_keys[slot]
                 else:
                     slot = iteration
+                    # 【新增改动】将原来的 worker_idx 改为 target_idx，原来写的是 worker_idx, iteration, batch_size)
                     batch_keys = generate_batch_keys(
-                        worker_idx, iteration, batch_size)
+                        target_idx, iteration, batch_size)
 
                 buffer_ptrs = []
                 sizes = []
@@ -295,8 +300,13 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
                         alive_slots[slot] = iteration
                         alive_order.append(slot)
                 elif operation_mode == "batch_get":
-                    ret_codes = store.batch_get_into(batch_keys, buffer_ptrs, sizes)
-                    all_success = all(rc > 0 for rc in ret_codes)
+                    # 【核心改动】给读进程加个弹簧，失败了别秒报，原地最多揉揉眼睛等 50 次
+                    for retry in range(50):
+                        ret_codes = store.batch_get_into(batch_keys, buffer_ptrs, sizes)
+                        all_success = all(rc > 0 for rc in ret_codes)
+                        if all_success:
+                            break
+                        time.sleep(0.002) # 睡 2 毫秒，给写进程完成 Finalize 和大管家记账留点时间
                 latency = time.time() - start_time
 
                 if operation_mode == "batch_put" and eviction_window > 0:
@@ -333,6 +343,7 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
             store.unregister_buffer(buf_ptr)
         except Exception:
             pass
+        del buf
         mm.close()
         gc.collect()
         stats_queue.put((MSG_WORKER_DONE, worker_idx, 0))
