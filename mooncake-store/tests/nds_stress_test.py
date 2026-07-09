@@ -300,13 +300,13 @@ def worker_process(worker_idx, operation_mode, block_size, batch_size,
                         alive_slots[slot] = iteration
                         alive_order.append(slot)
                 elif operation_mode == "batch_get":
-                    # 【核心改动】给读进程加个弹簧，失败了别秒报，原地最多揉揉眼睛等 50 次
+                    # 【核心改动】给读进程加个弹簧，失败了别秒报
                     for retry in range(50):
                         ret_codes = store.batch_get_into(batch_keys, buffer_ptrs, sizes)
                         all_success = all(rc > 0 for rc in ret_codes)
                         if all_success:
                             break
-                        time.sleep(0.002) # 睡 2 毫秒，给写进程完成 Finalize 和大管家记账留点时间
+                        time.sleep(0.002) # 睡 2 毫秒，给写进程完成 Finalize 和TransferEngine留时间
                 latency = time.time() - start_time
 
                 if operation_mode == "batch_put" and eviction_window > 0:
