@@ -61,6 +61,13 @@ export VLLM_MOONCAKE_BOOTSTRAP_PORT=8998
 # 通过 pip 安装 nvidia-cuda-runtime-cu12 来提供 libcudart.so.12
 export LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cuda_runtime/lib:${LD_LIBRARY_PATH}
 
+# !!! no_proxy 防火墙 !!!
+# 防止 HTTP_PROXY 环境变量干扰 localhost 通信
+# 如果服务器配了全局 HTTP proxy，vLLM 内部的 HTTP 请求（包括 localhost）
+# 会被代理截获，导致连接失败。设 no_proxy 绕过 localhost
+export no_proxy=127.0.0.1,localhost
+export NO_PROXY=127.0.0.1,localhost
+
 echo "=== Starting Prefiller (kv_producer) on GPU ${PREFILLER_GPU_ID} ==="
 echo "Connector: MooncakeConnector (vLLM built-in, P2P handshake mode)"
 echo "Protocol: ${VLLM_MOONCAKE_PROTOCOL}"
@@ -69,9 +76,14 @@ echo "Port: ${PREFILLER_VLLM_PORT}"
 echo ""
 
 # === 启动 vLLM serve ===
+# !!! vLLM 0.21.0 参数命名规则 !!!
+# vLLM 0.21.0 把 --disable-X 改成了 --no-enable-X 模式
+# 旧版: --disable-log-requests
+# 新版: --no-enable-log-requests（用 --enable-log-requests / --no-enable-log-requests 一对）
+#
 # !!! 每个参数的含义 !!!
 # --port: vLLM 的 OpenAI API 端口
-# --disable-log-requests: 不打印每个请求的日志（减少干扰，benchmark 时很重要）
+# --no-enable-log-requests: 不打印每个请求的日志（减少干扰，benchmark 时很重要）
 # --enforce-eager: 禁用 CUDA Graph
 #   为什么禁用？CUDA Graph 会预录计算图，启动慢但运行快
 #   调试阶段用 eager 模式，能看到完整错误栈；正式 benchmark 可以去掉
@@ -85,7 +97,7 @@ echo ""
 # !!! 不需要 LMCACHE_CONFIG_FILE（内置 connector 不走 LMCache）!!!
 vllm serve "${MODEL_PATH}" \
     --port ${PREFILLER_VLLM_PORT} \
-    --disable-log-requests \
+    --no-enable-log-requests \
     --enforce-eager \
     --no-enable-prefix-caching \
     --kv-transfer-config \

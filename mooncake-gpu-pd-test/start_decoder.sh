@@ -46,6 +46,11 @@ export VLLM_MOONCAKE_BOOTSTRAP_PORT=8998
 # LD_LIBRARY_PATH: 修复 CUDA 12/13 不匹配问题
 export LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cuda_runtime/lib:${LD_LIBRARY_PATH}
 
+# !!! no_proxy 防火墙 !!!
+# 和 prefiller 一样，防止 HTTP proxy 干扰 localhost 通信
+export no_proxy=127.0.0.1,localhost
+export NO_PROXY=127.0.0.1,localhost
+
 echo "=== Starting Decoder (kv_consumer) on GPU ${DECODER_GPU_ID} ==="
 echo "Connector: MooncakeConnector (vLLM built-in, P2P handshake mode)"
 echo "Protocol: ${VLLM_MOONCAKE_PROTOCOL}"
@@ -54,11 +59,12 @@ echo "Port: ${DECODER_VLLM_PORT}"
 echo ""
 
 # === 启动 vLLM serve ===
+# vLLM 0.21.0 用 --no-enable-log-requests（不是旧版 --disable-log-requests）
 # kv_role: kv_consumer = 这个 vLLM 实例从 Mooncake 拉取 KV（消费）
 # 其他参数和 prefiller 相同，只有 kv_role 不同
 vllm serve "${MODEL_PATH}" \
     --port ${DECODER_VLLM_PORT} \
-    --disable-log-requests \
+    --no-enable-log-requests \
     --enforce-eager \
     --no-enable-prefix-caching \
     --kv-transfer-config \
