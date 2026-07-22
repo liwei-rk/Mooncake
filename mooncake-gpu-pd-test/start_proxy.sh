@@ -1,24 +1,22 @@
 #!/bin/bash
 # SPDX-License-Identifier: Apache-2.0
-# start_proxy.sh — 启动 PD Proxy
+# start_proxy.sh — 启动 vLLM 内置 Mooncake PD Proxy
 #
 # !!! 这个脚本是做什么的? !!!
-# PD Proxy 是 PD 分离架构中的"路由器"。用户请求发给 proxy，proxy 做两件事：
-#   Step 1: 发给 prefiller（max_tokens=1, stream=False）→ prefiller 算 KV 并存到 Mooncake
-#   Step 2: 从 prefiller 的响应中提取 kv_transfer_params（KV 位置信息）
-#   Step 3: 把 kv_transfer_params 和原始请求一起发给 decoder → decoder 从 Mooncake 拉 KV 做生成
-#   Step 4: 把 decoder 的流式输出转发给用户
+# PD Proxy 是 PD 分离架构中的"路由器"。用户请求发给 proxy，proxy 做：
+#   1. 生成 transfer_id (UUID)
+#   2. 异步发给 prefiller (max_tokens=1, do_remote_decode=true, transfer_id) — fire-and-forget
+#   3. 立即发给 decoder (do_remote_prefill=true, remote_bootstrap_addr, remote_engine_id, transfer_id)
+#   4. 流式返回 decoder 的输出
 #
-# !!! 两种 proxy 选择 !!!
-# 1. vLLM 内置 proxy (mooncake_connector_proxy.py) — 推荐
-#    位于 vLLM 源码 examples/online_serving/disaggregated_serving/mooncake_connector/
-#    vLLM >= 0.16.0 使用此 proxy
-# 2. 自定义 proxy (mooncake_pd_proxy.py) — 备用
-#    如果找不到 vLLM 内置 proxy，用我们自己的实现
+# !!! MooncakeConnector 是 push-based !!!
+# prefiller 不会在 HTTP 响应里返回 kv_transfer_params（和我们之前的假设不同）
+# proxy 启动时从 prefiller 的 bootstrap server (端口 8998) 获取 engine_id
+# 请求时 proxy 自己构造 kv_transfer_params 发给 decoder
 #
 # !!! 启动顺序 !!!
 # 必须先启动 Prefiller → Decoder → 最后启动 Proxy
-# Proxy 启动后会检查 prefiller 和 decoder 是否 ready
+# Proxy 启动时会查 prefiller 的 bootstrap server 获取 engine_id
 
 set -e
 
@@ -26,6 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # !!! 华为代理防火墙 !!!
 # 服务器在华为代理后面，http_proxy/https_proxy 会干扰 localhost 通信
+# 必须在启动 proxy 之前设置，否则 httpx 会把 localhost 请求路由到华为代理
 export no_proxy=127.0.0.1,localhost
 export NO_PROXY=127.0.0.1,localhost
 
@@ -36,13 +35,14 @@ PREFILLER_HOST="localhost"
 PREFILLER_PORT=7100
 DECODER_HOST="localhost"
 DECODER_PORT=7200
+BOOTSTRAP_PORT=8998          # MooncakeConnector bootstrap server 端口
 
-# === 尝试找到 vLLM 内置的 mooncake_connector_proxy.py ===
-# vLLM 0.21.0 的 proxy 可能在以下位置：
+# === 找 vLLM 内置的 mooncake_connector_proxy.py ===
+# 从 vLLM 0.21.0 Docker 镜像中查找
 VLLM_PROXY_CANDIDATES=(
-    "/vllm-workspace/examples/online_serving/disaggregated_serving/mooncake_connector/mooncake_connector_proxy.py"
-    "/workspace/vllm/examples/online_serving/disaggregated_serving/mooncake_connector/mooncake_connector_proxy.py"
-    "$(python3 -c 'import vllm; import os; print(os.path.join(os.path.dirname(vllm.__file__), "..", "examples", "online_serving", "disaggregated_serving", "mooncake_connector", "mooncake_connector_proxy.py"))' 2>/dev/null)"
+    "/vllm-workspace/examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py"
+    "/home/xinlang/ygj/dockers/images/vllm-0.21.0/examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py"
+    "/home/xinlang/yyc/images/vllm/examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py"
 )
 
 VLLM_PROXY=""
@@ -53,10 +53,26 @@ for candidate in "${VLLM_PROXY_CANDIDATES[@]}"; do
     fi
 done
 
-echo "=== Starting PD Proxy ==="
-echo "  Proxy:  ${PROXY_HOST}:${PROXY_PORT}"
-echo "  Prefiller: ${PREFILLER_HOST}:${PREFILLER_PORT}"
-echo "  Decoder:   ${DECODER_HOST}:${DECODER_PORT}"
+# 如果没找到，全局搜索
+if [ -z "$VLLM_PROXY" ]; then
+    echo "Searching for mooncake_connector_proxy.py..."
+    VLLM_PROXY=$(find / -name "mooncake_connector_proxy.py" 2>/dev/null | head -1)
+fi
+
+if [ -z "$VLLM_PROXY" ]; then
+    echo "ERROR: mooncake_connector_proxy.py not found!"
+    echo "This proxy is required for MooncakeConnector (push-based protocol)."
+    echo "Our custom proxy (mooncake_pd_proxy.py) does NOT work with MooncakeConnector."
+    exit 1
+fi
+
+echo "=== Starting vLLM built-in Mooncake Proxy ==="
+echo "  Proxy:       ${PROXY_HOST}:${PROXY_PORT}"
+echo "  Prefiller:   ${PREFILLER_HOST}:${PREFILLER_PORT}"
+echo "  Bootstrap:   ${BOOTSTRAP_PORT}"
+echo "  Decoder:     ${DECODER_HOST}:${DECODER_PORT}"
+echo "  Proxy file:  ${VLLM_PROXY}"
+echo ""
 
 # === 等待 prefiller 和 decoder 就绪 ===
 echo "=== Waiting for prefiller and decoder to be ready ==="
@@ -72,26 +88,15 @@ for service in "${PREFILLER_HOST}:${PREFILLER_PORT}" "${DECODER_HOST}:${DECODER_
         sleep 5
     done
 done
+echo ""
 
-# === 启动 proxy ===
-if [ -n "$VLLM_PROXY" ]; then
-    echo "Using vLLM built-in proxy: ${VLLM_PROXY}"
-    python3 -u "${VLLM_PROXY}" \
-        --prefill "http://${PREFILLER_HOST}:${PREFILLER_PORT}" \
-        --decode "http://${DECODER_HOST}:${DECODER_PORT}" \
-        --host "${PROXY_HOST}" \
-        --port "${PROXY_PORT}"
-else
-    echo "vLLM built-in proxy not found. Using custom proxy: ${SCRIPT_DIR}/mooncake_pd_proxy.py"
-    echo "!!! 注意 !!!"
-    echo "如果你在 vLLM 容器里能找到 mooncake_connector_proxy.py，建议用那个"
-    echo "搜索命令: find / -name 'mooncake_connector_proxy.py' 2>/dev/null"
-    echo ""
-    python3 -u "${SCRIPT_DIR}/mooncake_pd_proxy.py" \
-        --host "${PROXY_HOST}" \
-        --port "${PROXY_PORT}" \
-        --prefiller-host "${PREFILLER_HOST}" \
-        --prefiller-port "${PREFILLER_PORT}" \
-        --decoder-host "${DECODER_HOST}" \
-        --decoder-port "${DECODER_PORT}"
-fi
+# === 启动 vLLM 内置 proxy ===
+# --prefill URL BOOTSTRAP_PORT: prefiller 地址 + bootstrap server 端口
+# --decode URL: decoder 地址
+# proxy 启动时会查 http://localhost:8998/query 获取 prefiller 的 engine_id
+echo "Starting proxy..."
+exec python3 -u "${VLLM_PROXY}" \
+    --host "${PROXY_HOST}" \
+    --port "${PROXY_PORT}" \
+    --prefill "http://${PREFILLER_HOST}:${PREFILLER_PORT}" "${BOOTSTRAP_PORT}" \
+    --decode "http://${DECODER_HOST}:${DECODER_PORT}"
