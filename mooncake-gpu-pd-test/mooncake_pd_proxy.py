@@ -77,7 +77,10 @@ async def send_to_prefiller(req_data: dict, request_id: str):
             resp = await client.post(
                 f"{PREFILLER_URL}/completions", json=prefill_req, headers=headers
             )
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                err_body = resp.text
+                print(f"[PROXY] Prefiller error {resp.status_code}: {err_body}")
+                return {"error": f"Prefiller {resp.status_code}: {err_body}"}
             return resp.json()
         except Exception as e:
             print(f"[PROXY] Prefiller request failed: {e}")
@@ -111,7 +114,10 @@ async def send_to_prefiller_chat(req_data: dict, request_id: str):
             resp = await client.post(
                 f"{PREFILLER_URL}/chat/completions", json=prefill_req, headers=headers
             )
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                err_body = resp.text
+                print(f"[PROXY] Prefiller chat error {resp.status_code}: {err_body}")
+                return {"error": f"Prefiller {resp.status_code}: {err_body}"}
             return resp.json()
         except Exception as e:
             print(f"[PROXY] Prefiller chat request failed: {e}")
@@ -126,8 +132,9 @@ async def proxy_completions(request: Request):
 
     # Step 1: Prefiller (prefill + KV store to Mooncake)
     prefill_resp = await send_to_prefiller(req_data, request_id)
-    if prefill_resp is None:
-        return JSONResponse({"error": "Prefiller request failed"}, status_code=500)
+    if prefill_resp is None or "error" in prefill_resp:
+        err = prefill_resp.get("error", "Prefiller request failed") if prefill_resp else "Prefiller request failed"
+        return JSONResponse({"error": err}, status_code=500)
 
     # !!! 提取 kv_transfer_params !!!
     # prefiller 返回的 JSON 里会包含 kv_transfer_params
@@ -181,8 +188,9 @@ async def proxy_chat_completions(request: Request):
 
     # Step 1: Prefiller
     prefill_resp = await send_to_prefiller_chat(req_data, request_id)
-    if prefill_resp is None:
-        return JSONResponse({"error": "Prefiller request failed"}, status_code=500)
+    if prefill_resp is None or "error" in prefill_resp:
+        err = prefill_resp.get("error", "Prefiller request failed") if prefill_resp else "Prefiller request failed"
+        return JSONResponse({"error": err}, status_code=500)
 
     kv_transfer_params = prefill_resp.get("kv_transfer_params", {})
     decode_req = req_data.copy()
