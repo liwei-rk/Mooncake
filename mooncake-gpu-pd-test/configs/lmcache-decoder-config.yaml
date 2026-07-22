@@ -1,0 +1,56 @@
+# LMCache 配置 - Decoder (kv_consumer)
+# 这个配置决定了 decoder 如何从 Mooncake 拉取 KV cache
+#
+# !!! 重点理解 !!!
+# decoder 和 prefiller 连接的是同一个 Mooncake 实例（同一个 master + metadata server）
+# 它们共享同一个 KV 存储池。prefiller 是 producer（写入），decoder 是 consumer（读取）
+# 所以这里的 metadata_server 和 master_server_address 必须和 prefiller 配置完全一致
+
+chunk_size: 256              # 必须和 prefiller 的 chunk_size 一致！
+                             # 为什么必须一致？因为 prefiller 按 256 tokens 一块存，
+                             # decoder 也必须按 256 tokens 一块读，否则块边界不匹配
+                             # 面试点：chunk_size 是 PD 分离中 P 和 D 的契约之一
+
+local_cpu: True              # 启用 CPU 内存做本地缓存层
+max_local_cpu_size: 5        # 5GB CPU 内存用于本地缓存
+                             # 为什么 decoder 也需要 local_cpu？因为从 Mooncake 拉到的 KV
+                             # 先放到 CPU 内存，再按需加载到 GPU 显存
+
+remote_url: "mooncakestore://localhost:50051/"
+                             # Mooncake store 地址，和 prefiller 完全相同
+                             # 因为它们连的是同一个 Mooncake 存储
+
+remote_serde: "naive"        # 序列化方式，和 prefiller 必须一致
+                             # 如果 prefiller 用 naive，decoder 也必须用 naive
+                             # 不一致会导致反序列化失败
+
+save_chunk_meta: false       # 零拷贝模式，和 prefiller 一致
+
+extra_config:
+  local_hostname: "decoder-host"
+                             # 区分不同 client 的标识，用于 Mooncake 内部追踪
+                             # 必须和 prefiller 不同（一个是 prefiller-host 一个是 decoder-host）
+
+  metadata_server: "http://localhost:8081/metadata"
+                             # 必须和 prefiller 的 metadata_server 完全一致！
+                             # 这是 P 和 D 能找到同一份 KV 的关键
+                             # prefiller 把 KV 位置信息注册到这个 metadata server
+                             # decoder 从这个 metadata server 查询 KV 位置
+
+  protocol: "tcp"            # 必须和 prefiller 一致
+                             # TCP 模式：简单可靠，不需要 RDMA 硬件
+                             # 后续验证通过后可以切到 RDMA 测性能提升
+
+  device_name: ""            # TCP 模式下留空
+
+  master_server_address: "localhost:50051"
+                             # Mooncake master RPC 地址，和 prefiller 一致
+
+  # 传统模式：和 prefiller 保持一致
+  global_segment_size: 32212254720    # 30GB
+  local_buffer_size: 1073741824       # 1GB
+                             # decoder 也需要 local_buffer 做 get 操作的数据中转
+
+  transfer_timeout: 5        # KV 传输超时（秒）
+                             # 如果 prefiller 还没存完 KV，decoder 拉取可能超时
+                             # 这就是为什么 proxy 里 warmup 后要 sleep 等待

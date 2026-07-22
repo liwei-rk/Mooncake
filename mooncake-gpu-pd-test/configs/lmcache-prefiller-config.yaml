@@ -1,0 +1,50 @@
+# LMCache 配置 - Prefiller (kv_producer)
+# 这个配置决定了 prefiller 如何把 KV cache 存到 Mooncake
+
+chunk_size: 256              # KV cache 分块大小。256 tokens 一块。
+                             # 为什么是256？太小→碎片多管理开销大；太大→缓存粒度粗复用率低
+                             # 面试点：chunk_size 影响 cache hit rate 和管理开销的 trade-off
+
+local_cpu: True              # 启用 CPU 内存做本地缓存层
+max_local_cpu_size: 5        # 5GB CPU 内存用于本地缓存
+
+remote_url: "mooncakestore://localhost:50051/"
+                             # Mooncake store 地址。prefiller 通过这个 URL 连接 Mooncake master
+
+remote_serde: "naive"        # 序列化方式。"naive" = 不压缩，直接传 raw bytes
+                             # 为什么用 naive？KV cache 是 float tensor，压缩开销大于收益
+                             # 如果带宽是瓶颈可以换 zstd 压缩
+
+save_chunk_meta: false       # 零拷贝模式：不存 TensorMetadata 前缀
+                             # 为什么 false？省去 metadata 序列化开销，prefiller/decoder 直接传 raw KV bytes
+
+extra_config:
+  local_hostname: "prefiller-host"
+  metadata_server: "http://localhost:8081/metadata"
+                             # Mooncake metadata server 地址，用于节点发现和 KV 定位
+                             # 必须和 start_mooncake_master.sh 里的端口一致
+
+  protocol: "tcp"            # 传输协议
+                             # tcp: 简单，不需要 RDMA 硬件，适合验证
+                             # rdma: 高性能，需要 MOFED 驱动 + RDMA NIC
+                             # 面试点：TCP vs RDMA 的延迟和带宽差异
+
+  device_name: ""            # RDMA 设备名。TCP 模式下留空
+
+  master_server_address: "localhost:50051"
+                             # Mooncake master RPC 地址
+
+  # 传统模式 (非 NDS)：以下两项必须 > 0
+  # NDS 模式下才设为 0
+  global_segment_size: 32212254720    # 30GB — Master 为 Client 分配的全局内存段
+                             # 为什么30GB？7B 模型 KV cache 每层约 2MB/token (TP=1)，
+                             # 28层 × 2MB ≈ 56MB/token，7500 tokens ≈ 420GB？不，
+                             # 实际 KV cache 远小于此（Q/K/V 各 hidden_dim × num_heads）
+                             # 30GB 足够存储多个请求的 KV cache
+
+  local_buffer_size: 1073741824       # 1GB — Client 本地缓冲区
+                             # 为什么需要 local_buffer？Mooncake client 需要一块本地内存做
+                             # 数据中转：put 时先写 local buffer 再传到 master，
+                             # get 时先从 master 拉到 local buffer 再给 vLLM
+
+  transfer_timeout: 5        # KV 传输超时（秒）。超过5秒没传完就报错
