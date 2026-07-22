@@ -429,15 +429,22 @@ async def main():
     print(f"{'='*60}")
 
     # Wait for target to be ready
+    # NOTE: vLLM built-in proxy only implements POST /v1/completions and
+    # POST /v1/chat/completions — it does NOT have GET /v1/models.
+    # So we use a TCP-level check: if the port accepts a connection and
+    # returns ANY HTTP response (even 404), the service is up.
+    # A ConnectError means the server hasn't started yet.
     print("\nWaiting for services to be ready...")
     health_url = args.proxy_url if args.mode == "proxy" else args.decoder_url
     for attempt in range(30):
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 r = await client.get(f"{health_url}/v1/models")
-                if r.status_code == 200:
-                    print("Services are ready.")
-                    break
+                # Any HTTP response (200, 404, etc.) means the server is running.
+                # Only connection failures (caught by except) mean it's not ready.
+                print(f"  Health check: HTTP {r.status_code} — service is responding.")
+                print("Services are ready.")
+                break
         except Exception:
             pass
         if attempt == 29:
