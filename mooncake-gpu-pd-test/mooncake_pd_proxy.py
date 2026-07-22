@@ -223,6 +223,17 @@ async def proxy_chat_completions(request: Request):
                 )
 
 
+@app.get("/v1/models")
+async def list_models():
+    """转发 prefiller 的 /v1/models，让 benchmark 的健康检查通过。"""
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            resp = await client.get(f"{PREFILLER_URL}/models")
+            return resp.json()
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=503)
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "prefiller": PREFILLER_URL, "decoder": DECODER_URL}

@@ -28,7 +28,7 @@ import uuid
 
 import httpx
 
-DEFAULT_MODEL = "test-model"
+DEFAULT_MODEL = "/mnt/model/Qwen2.5-7B-Instruct"  # vLLM 用模型路径作为 model id
 DEFAULT_PROXY_URL = "http://localhost:19000"  # 9100 被 node_exporter 占用，改用 19000
 DEFAULT_PREFILLER_URL = "http://localhost:7100"
 DEFAULT_DECODER_URL = "http://localhost:7200"
