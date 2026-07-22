@@ -34,6 +34,14 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
+# !!! 华为代理防火墙 !!!
+# 服务器在华为代理后面，用户设了 http_proxy/https_proxy 来拉 git
+# httpx 默认继承这些环境变量，导致 localhost:7100/7200 的请求
+# 被路由到华为代理服务器，代理无法访问容器内的 localhost → prefiller 请求失败
+# 设 no_proxy 绕过 localhost，必须在 httpx 创建 client 之前设置
+os.environ.setdefault('no_proxy', '127.0.0.1,localhost')
+os.environ.setdefault('NO_PROXY', '127.0.0.1,localhost')
+
 app = FastAPI()
 
 PREFILLER_URL = "http://localhost:7100/v1"

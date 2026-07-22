@@ -24,6 +24,11 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# !!! 华为代理防火墙 !!!
+# 服务器在华为代理后面，http_proxy/https_proxy 会干扰 localhost 通信
+export no_proxy=127.0.0.1,localhost
+export NO_PROXY=127.0.0.1,localhost
+
 # === 端口配置 ===
 PROXY_HOST="0.0.0.0"
 PROXY_PORT=19000              # 9100 被 node_exporter 占用，改用 19000
