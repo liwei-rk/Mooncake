@@ -22,3 +22,8 @@ Thumbs.db
 
 # Benchmark results
 bench_results/
+
+# 敏感文件（含 SSH 凭据/K8s 配置）
+ssh_cmd.py
+.kube-cache/
+.kube/

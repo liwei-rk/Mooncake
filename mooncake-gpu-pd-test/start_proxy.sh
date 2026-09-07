@@ -38,8 +38,9 @@ DECODER_PORT=7200
 BOOTSTRAP_PORT=8998          # MooncakeConnector bootstrap server 端口
 
 # === 找 vLLM 内置的 mooncake_connector_proxy.py ===
-# 从 vLLM 0.21.0 Docker 镜像中查找
+# vLLM 0.20.2 的路径和 0.21.0 不同，添加 0.20.2 的路径
 VLLM_PROXY_CANDIDATES=(
+    "/vllm-workspace/examples/online_serving/disaggregated_serving/mooncake_connector/mooncake_connector_proxy.py"
     "/vllm-workspace/examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py"
     "/home/xinlang/ygj/dockers/images/vllm-0.21.0/examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py"
     "/home/xinlang/yyc/images/vllm/examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py"

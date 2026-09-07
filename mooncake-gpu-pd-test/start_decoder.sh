@@ -17,13 +17,15 @@
 set -e
 
 # === 核心变量 ===
-MODEL_PATH="/mnt/model/Qwen2.5-7B-Instruct"  # 必须和 prefiller 用的模型完全一致！
+MODEL_PATH="/home/model/Qwen2.5-7B"       # 必须和 prefiller 用的模型完全一致！
                                          # 为什么必须一致？KV cache 的结构（层数、head 数、hidden dim）
                                          # 完全由模型决定。不同模型的 KV 不能互换
-DECODER_GPU_ID=1                        # Decoder 用 GPU 1（和 prefiller 的 GPU 0 不冲突）
-                                         # 为什么各用一张卡？PD 分离的核心就是 P 和 D 在不同 GPU 上
-                                         # 如果在同一卡上，会产生 GPU 资源争抢——这就是分离的意义
+DECODER_GPU_ID=0                        # 单 GPU 模式：Decoder 也用 GPU 0（和 prefiller 同一张卡）
+                                         # 正常 PD 分离应该用不同 GPU，但此服务器只有 1 张 RTX A6000
+                                         # 两个 vLLM 实例各用 40% 显存（49GB * 0.40 = ~19.6GB/实例）
+                                         # 7B 权重 ~14GB + KV 缓存 ~5GB，刚好放得下
 DECODER_VLLM_PORT=7200                  # vLLM OpenAI API 端口（和 prefiller 的 7100 不同）
+GPU_MEM_UTIL=0.40                        # 和 prefiller 一样的显存比例
 
 # === GPU 设备隔离 ===
 export CUDA_VISIBLE_DEVICES="${DECODER_GPU_ID}"
@@ -64,6 +66,9 @@ echo ""
 # 其他参数和 prefiller 相同，只有 kv_role 不同
 vllm serve "${MODEL_PATH}" \
     --port ${DECODER_VLLM_PORT} \
+    --tensor-parallel-size 1 \
+    --gpu-memory-utilization ${GPU_MEM_UTIL} \
+    --max-model-len 8192 \
     --no-enable-log-requests \
     --enforce-eager \
     --no-enable-prefix-caching \

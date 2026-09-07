@@ -20,13 +20,15 @@
 set -e
 
 # === 核心变量 ===
-MODEL_PATH="/mnt/model/Qwen2.5-7B-Instruct"  # 模型路径（服务器上确认过的实际路径）
+MODEL_PATH="/home/model/Qwen2.5-7B"       # 模型路径（51.36.133.128 服务器上的实际路径）
                                          # 为什么先跑 7B？7B 单卡能放下（~14GB 显存）
                                          # 72B 需要 TP=4+ 跨多卡，增加复杂度
                                          # 先跑通 7B 验证流程，再换 72B 做正式实验
 PREFILLER_GPU_ID=0                      # Prefiller 用 GPU 0
 PREFILLER_VLLM_PORT=7100                # vLLM OpenAI API 端口
                                          # 7100 = prefiller, 7200 = decoder (见 start_decoder.sh)
+GPU_MEM_UTIL=0.40                        # 单 GPU 上跑两个实例，每个用 40% 显存
+                                         # 49GB * 0.40 = ~19.6GB/实例，7B权重~14GB + KV缓存~5GB
 
 # === GPU 设备隔离 ===
 # !!! 这是从 NPU 迁移到 GPU 最关键的一行 !!!
@@ -97,6 +99,9 @@ echo ""
 # !!! 不需要 LMCACHE_CONFIG_FILE（内置 connector 不走 LMCache）!!!
 vllm serve "${MODEL_PATH}" \
     --port ${PREFILLER_VLLM_PORT} \
+    --tensor-parallel-size 1 \
+    --gpu-memory-utilization ${GPU_MEM_UTIL} \
+    --max-model-len 8192 \
     --no-enable-log-requests \
     --enforce-eager \
     --no-enable-prefix-caching \
