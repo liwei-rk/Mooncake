@@ -15,6 +15,7 @@
 | L1 C++ 全链路 | `nds_client_test --protocol=tcp`（配 `OD_KV_NSID`） | `[  PASSED  ] 9 tests.` |
 | L2 单进程数据正确性 | `nds_data_correctness_test.py --block-size=33554432 --batch-size=2` | `Disk-only BatchGet: all N keys OK` + `data verified OK`；日志中 `StoreObjects failed` 计数为 **0** |
 | L3 多进程压测 | `nds_stress_test.py --num-workers 2 --duration 15 --block-size 33554432 --batch-size 2` | `Total errors: 0`、`Error rate: 0.000%`、`Avg bandwidth ≥ 5 GB/s`（实测均值 7.2，峰值 13.26）|
+| L4 官方 E2E | `e2e_rand_test --run_sec=30 --etcd_endpoints=127.0.0.1:2379`（见第 9 节） | `[  PASSED  ] 1 test.`、日志 `TEST_ERROR` 计数为 **0** |
 
 L3 两个 worker 是**独立进程**（各自持有独立 NDS 实例），writer 写的 key 由 reader 进程读 —— 这就是"多进程链路"的直接证据。
 
@@ -230,3 +231,31 @@ pkill -9 -f unattended-upgrade # 处理 dpkg 锁
 **pkill -f 自杀陷阱**：`pkill -f <模式>` 会匹配 SSH/脚本自身命令行（脚本文本里含同样字符串）。把清理动作写进**服务器端脚本文件**（如 `/tmp/kill_nds.sh`）再 `bash /tmp/kill_nds.sh` 执行。模式加 `[e]` 括号技巧仅在同一命令行没有其他真实匹配时有效。
 
 僵尸 master（`<defunct>`）无害，不占端口，忽略即可。
+
+## 9. 官方 E2E（e2e_rand_test，HA + etcd）
+
+`mooncake-store/tests/e2e/` 是 Mooncake 官方系统级端到端测试：测试框架自动拉起 **HA master 进程**（`--enable-ha=true`，leader 选举走 etcd），2 个独立 client 进程做随机 put/get/delete 并校验数据。
+
+### 9.1 与第 3-4 节构建的差异
+
+| 项 | 说明 |
+|---|---|
+| Go 1.23.8 | HA 的 etcd helper 用 **Go c-shared wrapper**（libetcd_wrapper.so）。服务器断网时：本地下载 go1.23.8（阿里云 golang 镜像）→ 在 `mooncake-common/etcd` 目录 `GOPROXY=http://mirrors.aliyun.com/goproxy/,https://goproxy.cn,direct go mod tidy && go mod vendor` → 整个 etcd 目录（含 vendor/）上传替换 → patch `etcd/CMakeLists.txt` 把 `bash -c "go mod tidy" && bash -c "go build` 替换成 `bash -c "go build -mod=vendor`（跳过联网 tidy）→ 服务器装 Go（`tar -C /usr/local -xzf go1.23.8.linux-amd64.tar.gz`），构建时 `export PATH=/usr/local/go/bin:$PATH GOFLAGS=-mod=vendor GOPROXY=off` |
+| cmake 参数 | 在第 4 节基础上加 `-DSTORE_USE_ETCD=ON`（USE_ETCD/USE_ETCD_LEGACY 不需要）|
+| etcd 服务端 | 华为云镜像 `https://mirrors.huaweicloud.com/etcd/v3.5.21/etcd-v3.5.21-linux-amd64.tar.gz`，单机起：`etcd --name nds-e2e --listen-client-urls http://127.0.0.1:2379 --advertise-client-urls http://127.0.0.1:2379 --listen-peer-urls http://127.0.0.1:2380 --initial-advertise-peer-urls http://127.0.0.1:2380 --initial-cluster nds-e2e=http://127.0.0.1:2380` |
+| TE metadata | E2E client 的 TE 需要 `--engine_meta_url=http://127.0.0.1:8080/metadata`：另起一个 master `--enable_http_metadata_server=true --http_metadata_server_port=8080 --rpc_port=50098 --metrics_port=18082`（**metrics 端口必须换**，默认 9003 会和 E2E master 冲突）|
+
+### 9.2 运行
+
+```bash
+cd /home/yyc/Mooncake-kv_v8/build
+./mooncake-store/tests/e2e/e2e_rand_test --run_sec=30 \
+  --etcd_endpoints=127.0.0.1:2379 --protocol=tcp \
+  --engine_meta_url=http://127.0.0.1:8080/metadata --rand_seed=42
+```
+
+**跑通标志**：`[  PASSED  ] 1 test.`（E2E_EXIT=0），日志 `TEST_ERROR` 计数 0，master 计量出现 `PutEnd=34/34` 级别的成功计数。
+
+### 9.3 已修的坑（提交 3a65c13）
+
+E2E harness 用 `--enable-ha=true` 启动 master 但不传 `--cluster_id`：master 默认 `mooncake_cluster`，把 view 写到 `mooncake-store/mooncake_cluster/master_view`；client 空 namespace 解析成 `mooncake`，读 `mooncake-store/mooncake/master_view` → 永远找不到 master view。已给 process_handler.cpp 显式加 `--cluster_id=mooncake`。
