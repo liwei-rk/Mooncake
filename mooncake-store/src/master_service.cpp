@@ -764,7 +764,12 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
             replicas.emplace_back(file_path, total_length,
                                   ReplicaStatus::PROCESSING);
         } else {
-            replicas.emplace_back("", total_length,
+            // NDS 模式没有文件系统路径，但读路径（transfer_task.cpp）靠
+            // ExtractKeyFromPath(file_path) 取末段还原 key，再 objectKeyToUint64
+            // 算 blockId。如果这里放空串，读端永远拿到 hash("") 读同一个
+            // 不存在的 slot（盘框报 1842，DISK 副本全部读失败）。
+            // 因此直接放 key 本身，保证读写两端 blockId 一致。
+            replicas.emplace_back(key, total_length,
                                   ReplicaStatus::PROCESSING);
         }
     }
