@@ -13,7 +13,7 @@
 | 层 | 命令 | 跑通标志 |
 |---|---|---|
 | L1 C++ 全链路 | `nds_client_test --protocol=tcp`（配 `OD_KV_NSID`） | `[  PASSED  ] 9 tests.` |
-| L2 单进程数据正确性 | `nds_data_correctness_test.py --block-size=33554432 --batch-size=2` | `Disk-only BatchGet: all N keys OK` + `data verified OK`；日志中 `StoreObjects failed` 计数为 **0** |
+| L2 单进程数据正确性 | `nds_data_correctness_test.py --block-size=33554432 --batch-size=2 --global-segment-size 256` | 五个 Phase 全过（E2E_EXIT=0）、`Disk-only BatchGet data verified OK`；日志中 `StoreObjects failed` 计数为 **0**。`--global-segment-size 256` 必带：默认 64MB 塞不下 2×32MB 批量，会假报 insufficient space |
 | L3 多进程压测 | `nds_stress_test.py --num-workers 2 --duration 15 --block-size 33554432 --batch-size 2` | `Total errors: 0`、`Error rate: 0.000%`、`Avg bandwidth ≥ 5 GB/s`（实测均值 7.2，峰值 13.26）|
 | L4 官方 E2E | `e2e_rand_test --run_sec=30 --etcd_endpoints=127.0.0.1:2379`（见第 9 节） | `[  PASSED  ] 1 test.`、日志 `TEST_ERROR` 计数为 **0** |
 
