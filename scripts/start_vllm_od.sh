@@ -8,6 +8,8 @@ export MC_NDS_CONFIG=/home/yyc/mooncake_nds_runtime/nds_config.conf
 export OD_KV_NSID=147815026
 export no_proxy=127.0.0.1,localhost
 export VLLM_LOGGING_LEVEL=INFO
+# D2H 时机验证（每进程首段 put 触发一次 3s 延迟复读对比，日志看 VERIFY-D2H 行）
+export MC_STORAGE_VERIFY_D2H=1
 exec python3 -m vllm.entrypoints.openai.api_server \
   --model /home/model/Qwen2.5-7B --served-model-name qwen \
   --gpu-memory-utilization 0.85 --max-model-len 4096 --block-size 16 \

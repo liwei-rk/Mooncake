@@ -101,6 +101,11 @@ class MooncakeStorageInterface:
         # 数据级 dump（排查读回错位用）：put/get 的 value 落盘文件
         self._dump_dir = os.environ.get("MC_STORAGE_DUMP", "")
         self._dump_seq = 0
+        # D2H 时机验证：首段 D2H 后 sleep 3s 再复读同一段 GPU 显存，逐字节对比
+        # WHY：证伪/证实 "cudaDeviceSynchronize 后 D2H 仍读到未完成 kernel 的半成品"——
+        # 若复读不一致说明依赖链有洞；一致则证明写入盘框的即最终 KV 值
+        self._verify_d2h = os.environ.get("MC_STORAGE_VERIFY_D2H", "") not in ("", "0", "false")
+        self._verify_d2h_done = False
         self._next_slot = 0
         self._lock = threading.Lock()
         self._cudart = None
@@ -176,6 +181,42 @@ class MooncakeStorageInterface:
         r = self._cudart.cudaStreamSynchronize(ctypes.c_void_p(stream))
         if r != 0:
             raise RuntimeError("cudaStreamSynchronize failed, rc={}".format(r))
+
+    def _verify_first_d2h(self, key: str, seg_idx: int, mr_id: int, hbm_addr: int,
+                          storage_offset: int, length: int, stream: int):
+        """D2H 时机验证（每进程一次）：等主流程 D2H 落地取 X → sleep 3s（任何
+        未完成 kernel 必然结束）→ 复读同一段 GPU 显存得 Y → 逐字节对比。
+        WHY：X 是将要写入盘框的数据；若 X != Y，说明 cudaDeviceSynchronize 后
+        D2H 仍读到未完成的半成品（O1!=O2 分析的头号疑点），依赖链必须修；
+        若 X == Y，写入盘框的即最终 KV，输出分叉只能另找根因。"""
+        try:
+            self._stream_sync(stream)  # 等主流程异步 D2H 真正落到 staging
+            slot = self._write_pending.get(key)
+            if slot is None:
+                logger.warning("[mc-storage] VERIFY-D2H skip: slot missing for %s", key)
+                return
+            x = bytes(self._staging_view[slot.staging_offset + storage_offset:
+                                         slot.staging_offset + storage_offset + length])
+            time.sleep(3.0)
+            voff = self._alloc_slot(1024 * 1024, "w")
+            self._memcpy(self._staging_base + voff, self._base_addrs[mr_id] + hbm_addr,
+                         length, _CUDA_MEMCPY_DEVICE_TO_HOST, stream)
+            self._stream_sync(stream)
+            y = bytes(self._staging_view[voff:voff + length])
+            if x != y:
+                first_diff = next((j for j in range(min(len(x), len(y)))
+                                   if x[j] != y[j]), -1)
+                logger.error(
+                    "[mc-storage] VERIFY-D2H MISMATCH! key=%s seg=%d off=%d len=%d "
+                    "first_diff_byte=%d —— D2H 读到半成品，依赖链有洞", key, seg_idx,
+                    storage_offset, length, first_diff)
+            else:
+                logger.info(
+                    "[mc-storage] VERIFY-D2H OK key=%s seg=%d off=%d len=%d "
+                    "(D2H 值 == 延迟复读值，写入即最终 KV)", key, seg_idx,
+                    storage_offset, length)
+        except Exception as e:
+            logger.warning("[mc-storage] VERIFY-D2H failed: %s", e)
 
     def _alloc_slot(self, value_size: int, region: str) -> int:
         """staging 内按 value_size 对齐分配槽位（1MB 倍数，天然 4096 对齐）"""
@@ -345,6 +386,11 @@ class MooncakeStorageInterface:
                             length_list[i],
                             _CUDA_MEMCPY_DEVICE_TO_HOST, stream_id)
                         slot.received_layers.add(mr_id // 2)
+                        if self._verify_d2h and not self._verify_d2h_done:
+                            self._verify_d2h_done = True
+                            self._verify_first_d2h(key, i, mr_id, hbm_addr_list[i],
+                                                   storage_offset_list[i], length_list[i],
+                                                   stream_id)
                     except Exception as e:
                         logger.error("[mc-storage] put D2H failed seg %d: %s", i, e)
                         results[i] = 1
