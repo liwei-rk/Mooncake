@@ -111,6 +111,16 @@ void FilereadWorkerPool::workerThread() {
                             task.state->set_completed(ErrorCode::TRANSFER_FAIL);
                             continue;
                         }
+                        // WHY here: first NDS read triggers the deferred
+                        // one-shot multi-MR init so all registered regions
+                        // are in the MR set before any zero-copy IO.
+                        auto init_result = kv_backend_->EnsureInitialized();
+                        if (!init_result) {
+                            LOG(ERROR) << "NDS EnsureInitialized failed: "
+                                       << toString(init_result.error());
+                            task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                            continue;
+                        }
                         auto load_result = kv_backend_->LoadObjects(
                             {task.nds_key}, {task.slices});
                         if (load_result) {
@@ -152,6 +162,15 @@ void FilereadWorkerPool::workerThread() {
                 try {
                     if (!kv_backend_) {
                         LOG(ERROR) << "KV backend not initialized, cannot load NDS batch objects";
+                        task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                        continue;
+                    }
+                    // WHY here: deferred one-shot multi-MR init (see single
+                    // task above) — batch reads are the sglang hot path.
+                    auto init_result = kv_backend_->EnsureInitialized();
+                    if (!init_result) {
+                        LOG(ERROR) << "NDS EnsureInitialized failed: "
+                                   << toString(init_result.error());
                         task.state->set_completed(ErrorCode::TRANSFER_FAIL);
                         continue;
                     }

@@ -1238,6 +1238,22 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
         for (auto it = start_result.value().rbegin();
              it != start_result.value().rend(); ++it) {
             if (it->is_disk_replica()) {
+                if (!kv_storage_backend_->isInitialized()) {
+                    // WHY skip NDS here: bytes-API puts (e.g. sglang HiCache
+                    // warmup) can arrive BEFORE host pools are registered.
+                    // Burning the one-shot NDS init on this put (with only
+                    // the local buffer in the MR set) would exclude every
+                    // later register_buffer() region and silently break all
+                    // batch disk writes. Fall back to the memory replica;
+                    // NDS init happens at the first batch transfer.
+                    VLOG(0) << "NDS not initialized yet; put key=" << key
+                            << " via memory replica (deferred NDS init)";
+                    auto revoke_result = master_client_.PutRevoke(key, ReplicaType::DISK);
+                    if (!revoke_result) {
+                        LOG(ERROR) << "Failed to revoke put operation for key: " << key;
+                    }
+                    break;
+                }
                 auto disk_descriptor = it->get_disk_descriptor();
                 auto nds_result = kv_storage_backend_->StoreObjects({key}, {{slices}});
                 if (!nds_result) {
@@ -1462,6 +1478,24 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
             write_thread_pool_.enqueue(
                 [this, b_keys = std::move(nds_keys),
                  b_slices = std::move(nds_slices)]() mutable {
+                    // WHY here: first NDS data operation triggers the
+                    // deferred one-shot multi-MR init (local buffer + all
+                    // register_buffer regions accumulated so far).
+                    auto init_result = kv_storage_backend_->EnsureInitialized();
+                    if (!init_result) {
+                        LOG(ERROR) << "NDS EnsureInitialized failed: "
+                                   << toString(init_result.error());
+                        for (size_t j = 0; j < b_keys.size(); ++j) {
+                            auto revoke_result = master_client_.PutRevoke(
+                                b_keys[j], ReplicaType::DISK);
+                            if (!revoke_result) {
+                                LOG(ERROR)
+                                    << "Failed to revoke DISK put for key: "
+                                    << b_keys[j];
+                            }
+                        }
+                        return;
+                    }
                     auto nds_result = kv_storage_backend_->StoreObjects(
                         b_keys, b_slices);
                     if (!nds_result) {
@@ -2103,11 +2137,16 @@ tl::expected<void, ErrorCode> Client::RegisterLocalMemory(
             addr, length, location, remote_accessible, update_metadata) != 0) {
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
-    if (use_od_ && kv_storage_backend_ && !kv_storage_backend_->isInitialized()) {
-        auto init_result = kv_storage_backend_->Init(addr, length);
-        if (!init_result) {
-            LOG(ERROR) << "Failed to initialize KVStorageBackend in RegisterLocalMemory: "
-                       << init_result.error();
+    if (use_od_ && kv_storage_backend_) {
+        // WHY unconditional (was: only when not yet initialized): NDS init
+        // is one-shot, so every region (local buffer + later
+        // register_buffer callers, e.g. sglang HiCache host pools) must be
+        // accumulated BEFORE the single init. The init itself is deferred
+        // to the first NDS data operation (EnsureInitialized).
+        auto add_result = kv_storage_backend_->Init(addr, length);
+        if (!add_result) {
+            LOG(ERROR) << "Failed to add region to KVStorageBackend in RegisterLocalMemory: "
+                       << toString(add_result.error());
         }
     }
     return {};
@@ -2119,8 +2158,12 @@ tl::expected<void, ErrorCode> Client::unregisterLocalMemory(
         0) {
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
-    if (use_od_ && kv_storage_backend_ && kv_storage_backend_->isInitialized()) {
-        kv_storage_backend_->CleanupNDS();
+    if (use_od_ && kv_storage_backend_) {
+        // WHY not CleanupNDS: nds_init is one-shot; unregistering a single
+        // buffer must not tear down the whole MR set mid-run. Pre-init
+        // regions are dropped from the pending list; post-init unregisters
+        // keep the (stale but harmless) MR entry until teardown.
+        kv_storage_backend_->RemoveRegion(addr);
     }
     return {};
 }
