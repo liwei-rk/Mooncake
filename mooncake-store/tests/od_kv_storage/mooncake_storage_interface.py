@@ -302,7 +302,14 @@ class MooncakeStorageInterface:
             else:
                 # worker 侧：K/V 交替 → 层数 = n/2
                 self._total_layers = n // 2
-                staging_len = 192 * 1024 * 1024
+                # WHY 600MB（60/40 分区）：单请求最大 ~250 blocks
+                # （--max-model-len 4096），写区峰值 250 槽、读区峰值 250 槽
+                # （R 轮首层 224 keys 一次性 alloc，LRU 淘汰滞后于分配）。
+                # 192MB 版写区仅 115 槽 → >115 blocks 单请求 xds_put 失败；
+                # 400MB 版读区仅 160 槽 → >160 blocks 单请求 xds_get 失败
+                # （读回数据损坏，输出乱码，3584-token 实测复现）。
+                # 600MB：写 360 槽 / 读 240 槽，均覆盖峰值
+                staging_len = 600 * 1024 * 1024
 
             logger.info(
                 "[mc-storage] xds_init: sides=%s layers=%d bases=%d",
