@@ -48,15 +48,21 @@ struct GetStorageConfigResponse {
     std::string fsdir;
     bool enable_disk_eviction;
     uint64_t quota_bytes;
+    bool use_od;
+    uint32_t nsid;
 
-    GetStorageConfigResponse() : enable_disk_eviction(true), quota_bytes(0) {}
+    GetStorageConfigResponse()
+        : enable_disk_eviction(true), quota_bytes(0), use_od(false), nsid(0) {}
     GetStorageConfigResponse(const std::string& fsdir_param,
-                             bool enable_eviction, uint64_t quota)
+                             bool enable_eviction, uint64_t quota,
+                             bool use_od_param, uint32_t nsid_param)
         : fsdir(fsdir_param),
           enable_disk_eviction(enable_eviction),
-          quota_bytes(quota) {}
+          quota_bytes(quota),
+          use_od(use_od_param),
+          nsid(nsid_param) {}
 };
-YLT_REFL(GetStorageConfigResponse, fsdir, enable_disk_eviction, quota_bytes);
+YLT_REFL(GetStorageConfigResponse, fsdir, enable_disk_eviction, quota_bytes, use_od, nsid);
 
 /**
  * @brief Response structure for CopyStart operation

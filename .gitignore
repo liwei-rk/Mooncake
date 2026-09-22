@@ -2,6 +2,8 @@
 .vscode
 build
 build_ofed4
+build-cmake
+mooncake-store/.trae
 old
 local_test
 go.sum

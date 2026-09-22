@@ -786,7 +786,7 @@ class BucketStorageBackend : public StorageBackendInterface {
      * @return tl::expected<bool, ErrorCode>
      * - On success: true 表示可以继续 offload；false 表示达到上限/不允许继续。
      * - On failure: 返回错误码（例如 IO/内部错误）。
-     */
+     * */
     tl::expected<bool, ErrorCode> IsEnableOffloading() override;
 
     /**

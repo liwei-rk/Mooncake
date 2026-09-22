@@ -18,6 +18,65 @@ For KV cache data organization, HiCache builds upon the RadixTree structure intr
 
 HiRadixTree extends this idea: each node corresponds to the KV cache of a span of consecutive tokens and records where that KV cache is stored—whether in local GPU memory, CPU memory, L3 storage, or multiple of these tiers. If stored locally, HiRadixTree maintains precise metadata, including the exact storage address. However, to reduce overhead, HiRadixTree does not store or continuously synchronize metadata for L3 KV cache. Instead, when accessing L3 data, it queries the backend in real time to retrieve the necessary metadata, such as whether the data exists and on which server and location it resides.
 
+### KV Cache Storage Granularity
+
+KV cache is stored at **page granularity**, not as complete token sequences:
+
+- **Page Size**: Configured via `--page-size` parameter (commonly 64 tokens)
+- **Matching Granularity**: When `page_size > 1`, matching is performed at page granularity to optimize memory access patterns
+- **Node Splitting**: If a match terminates within a node's stored sequence, the node is automatically split to create an exact boundary
+
+### Key Design: Hash Chain for Position Differentiation
+
+Mooncake uses **`block_hash + parent_block_hash`** combination to distinguish different positions with the same token sequence, similar to Merkle Tree structure:
+
+```python
+BlockStored {
+    block_hashes: list[int]        # Current block hash
+    parent_block_hash: int | None  # Parent block hash
+    token_ids: list[int]           # Token IDs in this block
+    block_size: int                # Number of tokens per block
+}
+```
+
+**How it works**:
+
+Given two requests with `page_size = 64`:
+
+| Sequence | Token IDs | Block Decomposition |
+|----------|-----------|---------------------|
+| A: "hello world..." | [1,2,3,4,5,...] | Block0: [1-64], Block1: [65-128]... |
+| B: "hello moon..." | [1,2,3,6,7,...] | Block0: [1-64], Block1: [65-128]... |
+
+**Hash calculation**:
+
+```
+Sequence A:
+  B0_hash = hash([token_ids_1..64] + parent=None) = H0
+  B1_hash = hash([token_ids_65..128] + parent=H0) = H1
+  B2_hash = hash([token_ids_129..192] + parent=H1) = H2
+
+Sequence B:
+  B0_hash = hash([token_ids_1..64] + parent=None) = H0  # Shared with A!
+  B1_hash = hash([token_ids_65..128] + parent=H0) = H3  # Different!
+  B2_hash = hash([token_ids_129..192] + parent=H3) = H4
+```
+
+**Key mechanism**:
+
+1. **Prefix Sharing**: Same token prefix produces same `block_hash`, enabling KV cache reuse
+2. **Position Differentiation**: Different branches may have identical token_ids locally, but different `parent_block_hash` results in different `block_hash`
+
+**Mooncake Store Object Key format**: `kv_{rank}_{block_hash}`
+
+### Value Size Control
+
+Value size is controlled by page granularity:
+
+- Example: llama-3.1-405b has ~504 KB/token, a 64-token page is ~32 MB
+- Batch transfer limit is 128 pages (~4 GB)
+- Page-first layout ensures contiguous memory for zero-copy transfer
+
 ## Overall Workflow
 
 The workflow of HiCache mainly involves three key operations: **local match**, **prefetch** and **write-back**. When the system receives a new request, it first searches the local L1 and L2 caches for matching KV caches. For parts not found locally, it attempts to prefetch from L3. After prefetching, all required KV caches are loaded into the GPU for computation. Once the prefill computation is complete, the system considers storing the newly generated data into L2 or L3.

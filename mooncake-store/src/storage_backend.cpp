@@ -1311,7 +1311,7 @@ tl::expected<int64_t, ErrorCode> BucketStorageBackend::BatchOffload(
     }
     auto bucket = build_bucket_result.value();
 
-    // Phase 1: eviction — remove oldest buckets from metadata maps to make
+    // Phase 1: eviction 鈥?remove oldest buckets from metadata maps to make
     // room. Must notify master BEFORE deleting files (Phase 2).
     const int64_t required_size = bucket->data_size + bucket->meta_size;
     PendingEviction pending = PrepareEviction(required_size);

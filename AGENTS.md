@@ -2,6 +2,47 @@
 
 Mooncake is a KVCache-centric disaggregated architecture for LLM serving. Core components: Transfer Engine (data transfer), Store (distributed KVCache), P2P Store (peer-to-peer objects), EP (elastic expert parallelism).
 
+## Startup Workflow
+
+1. Read this file for rules and conventions.
+2. Read `feature_list.json` to find the active feature and its status.
+3. Read `progress.md` for what was done last session.
+4. Read `session-handoff.md` for blockers and next-step hints.
+5. Run `./init.sh` to verify the environment (build, format, metadata server).
+6. Work on ONE feature at a time. Do not start a new feature until the current one meets its done criteria.
+7. Before claiming a feature is done, record evidence in `progress.md`: passing test output, format check output, and any manual verification.
+
+## Definition of Done
+
+A feature is done when:
+- Code compiles without errors (`cmake .. && make -j` succeeds).
+- `scripts/code_format.sh --check` passes (no formatting violations).
+- All existing and new unit/integration tests pass.
+- Evidence is recorded in `progress.md` with actual command output.
+- `feature_list.json` status is updated to `done` with evidence description.
+
+## Scope Boundary
+
+- Do not modify components outside the active feature's scope without explicit instruction.
+- Do not refactor unrelated code, add tangential improvements, or expand the feature beyond its description.
+- If a change affects multiple features, stop and document the cross-cutting concern in `progress.md` before proceeding.
+
+## End-of-Session Procedure
+
+Before ending a session:
+1. Run `scripts/code_format.sh --check` and record the result.
+2. Run applicable tests and record pass/fail output.
+3. Update `progress.md` with evidence, blockers, and decisions.
+4. Update `feature_list.json` status for the active feature.
+5. Write `session-handoff.md` with: current objective, verification evidence, files changed, blockers, and recommended next step.
+
+## Harness State Files
+
+- `feature_list.json` - Tracks all features, their dependencies, status, and evidence.
+- `progress.md` - Session log: what's done, in-progress, blockers, decisions, evidence.
+- `session-handoff.md` - End-of-session summary for the next agent to restart quickly.
+- `init.sh` - Environment verification script (format check, build check, metadata server check).
+
 ## Build
 
 Dependencies (requires sudo):

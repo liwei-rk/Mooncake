@@ -1,0 +1,40 @@
+{
+  "features": [
+    {
+      "id": "feat-001",
+      "name": "Build Verification",
+      "description": "Confirm the project builds from clean checkout: mkdir build && cd build && cmake .. && make -j",
+      "dependencies": [],
+      "status": "not-started",
+      "evidence": "",
+      "done_criteria": "Build completes without errors; all expected targets are produced"
+    },
+    {
+      "id": "feat-002",
+      "name": "Transfer Engine Enhancement",
+      "description": "Replace this placeholder with the specific transfer engine feature to implement (e.g., new transport, RDMA Put API, batch optimization)",
+      "dependencies": ["feat-001"],
+      "status": "not-started",
+      "evidence": "",
+      "done_criteria": "Feature implemented, code format clean, existing unit tests still pass"
+    },
+    {
+      "id": "feat-003",
+      "name": "Store Enhancement",
+      "description": "Replace this placeholder with the specific store feature to implement (e.g., new eviction policy, put method improvement, metadata handling)",
+      "dependencies": ["feat-001"],
+      "status": "not-started",
+      "evidence": "",
+      "done_criteria": "Feature implemented, Python/C++ tests pass, format check clean"
+    },
+    {
+      "id": "feat-004",
+      "name": "Verification Coverage",
+      "description": "Add or extend tests for the active feature: unit tests, integration tests, or manual verification steps",
+      "dependencies": ["feat-002", "feat-003"],
+      "status": "not-started",
+      "evidence": "",
+      "done_criteria": "New tests added and passing; coverage includes edge cases"
+    }
+  ]
+}
