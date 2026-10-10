@@ -117,13 +117,6 @@ class MooncakeStorageInterface:
         # 批量读开关：miss key 走 batch_get_into（一次批量 RPC+批量传输），
         # =0 回退逐 key get_into 串行（对照/兜底用）
         self._batch_get = os.environ.get("MC_STORAGE_BATCH_GET", "1") not in ("0", "false")
-        # 批量写开关 + 延迟提交队列：凑齐层的 key 不再逐个 put_from——
-        # WHY 单 key put_from 在 deferred NDS init（MR 修复）下走 MEMORY 降级
-        # 且不触发 init，vLLM 写路径盘框零写入；batch 路径自带 EnsureInitialized。
-        # 凑齐的 key 挂 _flush_pending，xds_put 调用末尾一次 batch_put_from。
-        # =0 回退逐 key 串行（对照用；注意回退版同样会 MEMORY 降级不落盘）
-        self._batch_put = os.environ.get("MC_STORAGE_BATCH_PUT", "1") not in ("0", "false")
-        self._flush_pending = []   # [(key, _WriteSlot)] 凑齐待批量提交（slot 延迟回收）
         # 禁写开关（性能对照实验用）：xds_put 直接 no-op，测"全量 prefill+decode
         # 不带 save"的纯计算耗时，与正常写轮对比分离出 save 净开销
         self._disable_put = os.environ.get("MC_STORAGE_DISABLE_PUT", "") not in ("", "0", "false")
@@ -450,7 +443,7 @@ class MooncakeStorageInterface:
     def xds_put(self, req_id: str, mr_id_list, block_hash_list, hbm_addr_list,
                 storage_offset_list, length_list, stream_id: int) -> int:
         results = [0] * len(mr_id_list)
-        t_devsync = t_d2h = t_putrpc = t_flushsync = 0.0
+        t_devsync = t_d2h = t_putrpc = 0.0
         try:
             # 禁写对照模式：记录成功位图即返回，不做任何 D2H/RPC
             if self._disable_put:
@@ -508,112 +501,56 @@ class MooncakeStorageInterface:
                         results[i] = 1
                         continue
 
-                    # 凑齐全部层 → （批量路径）挂队列延迟统一 sync+提交
-                    # WHY 不逐 key sync（2026-09-22 性能优化）：每 key 一次
-                    # cudaStreamSynchronize 会把"提交 D2H→等完成→再提交"串行化，
-                    # 无法流水线——PERF 实测大 prompt 累计 338ms 等待，而
-                    # 194MB PCIe 传输本身仅需 ~8ms。改为 flush 前统一 sync 一次，
-                    # stream 上已排队的 D2H 全部并行完成后一次批量提交。
-                    # 逐 key 路径（_batch_put=0）与 dump 模式保留原地 sync。
+                    # 凑齐全部层 → 提交前必须等本 key D2H 落地
+                    # WHY 逐 key sync（批量 flush 统一 sync 已随批量 put 移除）：
+                    # 单 key put_from 的 staging 数据在提交时必须已完整 D2H，
+                    # 每 key 一次 cudaStreamSynchronize 串行化 submit→wait→submit，
+                    # 无法流水线（大 prompt 累计 ~338ms 等待）——这是去批量化后
+                    # 的正确性前提，也是与批量路径的性能代价差异。
                     if len(slot.received_layers) >= self._total_layers:
                         try:
                             if self._dump_dir:
                                 self._stream_sync(stream_id)
                             self._dump_value(key, "put", slot.staging_offset, value_size,
                                              "w")
-                            if self._batch_put:
-                                # 批量模式：挂队列延迟提交，slot 回收延迟到
-                                # 批量完成后（staging 数据提交前不能被覆盖）
-                                self._flush_pending.append((key, slot))
-                                del self._write_pending[key]
-                                self._done_keys[key] = True
-                                if len(self._done_keys) > 4096:
-                                    self._done_keys.pop(next(iter(self._done_keys)))
-                            else:
-                                # 逐 key 路径：提交前必须等本 key D2H 落地
-                                self._stream_sync(stream_id)
-                                tp0 = time.perf_counter()
-                                rc = self._store.put_from(
-                                    key, self._staging_base + slot.staging_offset, value_size)
-                                t_putrpc += (time.perf_counter() - tp0) * 1e3
-                                if rc != 0:
-                                    logger.error("[mc-storage] put_from %s rc=%d", key, rc)
-                                    results[i] = 1
-                                elif self._selftest:
-                                    # 自检：记录写入 value 的指纹，get 时对比读回是否一致
-                                    import hashlib as _h
-                                    self._put_fingerprints[key] = _h.md5(
-                                        self._staging_view[slot.staging_offset:
-                                                           slot.staging_offset + value_size]
-                                    ).hexdigest()
-                                    if len(self._put_fingerprints) > 64:
-                                        self._put_fingerprints.pop(next(iter(self._put_fingerprints)))
+                            # 逐 key 提交：提交前必须等本 key D2H 落地
+                            self._stream_sync(stream_id)
+                            tp0 = time.perf_counter()
+                            rc = self._store.put_from(
+                                key, self._staging_base + slot.staging_offset, value_size)
+                            t_putrpc += (time.perf_counter() - tp0) * 1e3
+                            if rc != 0:
+                                logger.error("[mc-storage] put_from %s rc=%d", key, rc)
+                                results[i] = 1
+                            elif self._selftest:
+                                # 自检：记录写入 value 的指纹，get 时对比读回是否一致
+                                import hashlib as _h
+                                self._put_fingerprints[key] = _h.md5(
+                                    self._staging_view[slot.staging_offset:
+                                                       slot.staging_offset + value_size]
+                                ).hexdigest()
+                                if len(self._put_fingerprints) > 64:
+                                    self._put_fingerprints.pop(next(iter(self._put_fingerprints)))
                         finally:
-                            if not self._batch_put:
-                                del self._write_pending[key]
-                                # WHY 回收：原版槽位只增不减（游标单调推高），
-                                # 写区 115 个 1MB 槽耗尽后所有后续请求直接失败
-                                self._free_slot(slot.staging_offset, "w")
-                                self._done_keys[key] = True
-                                if len(self._done_keys) > 4096:
-                                    self._done_keys.pop(next(iter(self._done_keys)))
-                # 批量提交：本调用凑齐的 key 一次 batch_put_from（batch 路径
-                # 自带 EnsureInitialized，首次触发 NDS init 时 MR 集已含
-                # local buffer + staging 全部区域）
-                if self._batch_put and self._flush_pending:
-                    # 统一等 store_stream 上所有 D2H 完成（替代逐 key sync）
-                    ts0 = time.perf_counter()
-                    self._stream_sync(stream_id)
-                    t_flushsync = (time.perf_counter() - ts0) * 1e3
-                    t_putrpc += self._flush_pending_batch(value_size, results)
+                            del self._write_pending[key]
+                            # WHY 回收：原版槽位只增不减（游标单调推高），
+                            # 写区 115 个 1MB 槽耗尽后所有后续请求直接失败
+                            self._free_slot(slot.staging_offset, "w")
+                            self._done_keys[key] = True
+                            if len(self._done_keys) > 4096:
+                                self._done_keys.pop(next(iter(self._done_keys)))
             t_d2h = (time.perf_counter() - t1) * 1e3
             if self._profile:
                 logger.info(
                     "[mc-storage] PERF put segs=%d devsync=%.2fms d2h_loop=%.2fms "
-                    "flushsync=%.2fms putrpc=%.2fms (putrpc 含整 value=%dKB 落盘框)",
-                    len(mr_id_list), t_devsync, t_d2h, t_flushsync, t_putrpc,
+                    "putrpc=%.2fms (putrpc 含整 value=%dKB 落盘框)",
+                    len(mr_id_list), t_devsync, t_d2h, t_putrpc,
                     value_size // 1024)
             self._batch_results[req_id] = results
             return 0
         except Exception as e:
             logger.exception("[mc-storage] xds_put failed: %s", e)
             return -1
-
-    def _flush_pending_batch(self, value_size: int, results) -> float:
-        """把 _flush_pending 里凑齐的 key 一次 batch_put_from 提交盘框。
-
-        返回批量 RPC 耗时(ms)（计入调用方的 putrpc 打点）。成功后回收写槽、
-        记 selftest 指纹；失败的 key 回填本次调用对应段的 results（凑齐必
-        发生在该 key 最后一段到达的调用里，故段索引可回溯）。
-        """
-        import hashlib as _h
-        pending = self._flush_pending
-        self._flush_pending = []
-        if not pending:
-            return 0.0
-        keys = [k for k, _ in pending]
-        tp0 = time.perf_counter()
-        rcs = self._store.batch_put_from(
-            keys,
-            [self._staging_base + slot.staging_offset for _, slot in pending],
-            [value_size] * len(pending))
-        elapsed = (time.perf_counter() - tp0) * 1e3
-        for j, (key, slot) in enumerate(pending):
-            rc = rcs[j]
-            if rc != 0:
-                # batch_put_from 成功返回 0（写语义），负值 = 错误码
-                logger.error("[mc-storage] batch_put_from %s rc=%d", key, rc)
-            elif self._selftest:
-                self._put_fingerprints[key] = _h.md5(
-                    self._staging_view[slot.staging_offset:
-                                       slot.staging_offset + value_size]
-                ).hexdigest()
-                if len(self._put_fingerprints) > 64:
-                    self._put_fingerprints.pop(next(iter(self._put_fingerprints)))
-        # WHY 先回收后返回：slot 生命周期覆盖整个批量提交
-        for _, slot in pending:
-            self._free_slot(slot.staging_offset, "w")
-        return elapsed
 
     # ------------------------------------------------------------------
     # xds_get：读缓存整 value → 按段拷回显存

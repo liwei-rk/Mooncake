@@ -33,11 +33,8 @@ ClientBufferAllocator::ClientBufferAllocator(size_t size,
         allocator_ = nullptr;
         return;
     }
-    // WHY 4096: NDS (initMulti) hard-refuses to register any MR unless every
-    // buffer base is page-aligned. The local buffer feeds the bytes-API
-    // put/get path (e.g. sglang HiCache warmup), which fails with mr_count=0
-    // under use_od when the base is merely cache-line aligned.
-    constexpr size_t alignment = 4096;
+    // Align to 64 bytes(cache line size) for better cache performance
+    constexpr size_t alignment = 64;
     if (use_hugepage_) {
         buffer_ = allocate_buffer_mmap_memory(size, alignment);
     } else {
