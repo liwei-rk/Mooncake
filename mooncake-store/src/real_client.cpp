@@ -228,7 +228,7 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
             hostname.substr(0, colon_pos + 1) + std::to_string(local_rpc_port);
         auto client_opt = mooncake::Client::Create(
             this->local_hostname, metadata_server, protocol, device_name,
-            master_server_addr, transfer_engine);
+            master_server_addr, transfer_engine, {});
         if (!client_opt) {
             LOG(ERROR) << "Failed to create client";
             return tl::unexpected(ErrorCode::INVALID_PARAMS);
@@ -257,7 +257,7 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
                 hostname + ":" + std::to_string(local_rpc_port);
             auto client_opt = mooncake::Client::Create(
                 this->local_hostname, metadata_server, protocol, device_name,
-                master_server_addr, transfer_engine);
+                master_server_addr, transfer_engine, {});
             if (client_opt) {
                 client_ = *client_opt;
                 success = true;
@@ -451,7 +451,8 @@ int RealClient::setup_real(
     return to_py_ret(setup_internal(local_hostname, metadata_server,
                                     global_segment_size, local_buffer_size,
                                     protocol, rdma_devices, master_server_addr,
-                                    transfer_engine, ipc_socket_path));
+                                    transfer_engine, ipc_socket_path, 50052,
+                                    false));
 }
 
 namespace {
@@ -527,13 +528,6 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
                    << MIN_SEGMENT_SIZE << " and " << MAX_SEGMENT_SIZE;
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
-    if (local_buffer_size < MIN_SEGMENT_SIZE ||
-        local_buffer_size > MAX_SEGMENT_SIZE) {
-        LOG(ERROR) << "Invalid " << CONFIG_KEY_LOCAL_BUFFER_SIZE << ": "
-                   << local_buffer_size << ", must be between "
-                   << MIN_SEGMENT_SIZE << " and " << MAX_SEGMENT_SIZE;
-        return tl::unexpected(ErrorCode::INVALID_PARAMS);
-    }
 
     // Validate protocol is supported
     if (protocol != "tcp" && protocol != "rdma") {
@@ -544,7 +538,8 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
 
     return setup_internal(local_hostname, metadata_server, global_segment_size,
                           local_buffer_size, protocol, rdma_devices,
-                          master_server_addr, nullptr, ipc_socket_path);
+                          master_server_addr, nullptr, ipc_socket_path,
+                          50052, false);
 }
 
 tl::expected<void, ErrorCode> RealClient::initAll_internal(

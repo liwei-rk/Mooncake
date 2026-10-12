@@ -614,6 +614,36 @@ std::vector<tl::expected<void, ErrorCode>> WrappedMasterService::BatchPutEnd(
     return results;
 }
 
+std::vector<tl::expected<void, ErrorCode>> WrappedMasterService::BatchPutEndDisk(
+    const UUID& client_id, const std::vector<std::string>& keys) {
+    ScopedVLogTimer timer(1, "BatchPutEndDisk");
+    const size_t total_keys = keys.size();
+    timer.LogRequest("client_id=", client_id, ", keys_count=", total_keys);
+
+    std::vector<tl::expected<void, ErrorCode>> results;
+    results.reserve(keys.size());
+
+    for (const auto& key : keys) {
+        results.emplace_back(
+            master_service_.PutEnd(client_id, key, ReplicaType::DISK));
+    }
+
+    size_t failure_count = 0;
+    for (size_t i = 0; i < results.size(); ++i) {
+        if (!results[i].has_value()) {
+            failure_count++;
+            auto error = results[i].error();
+            LOG(ERROR) << "BatchPutEndDisk failed for key[" << i << "] '"
+                       << keys[i] << "': " << toString(error);
+        }
+    }
+
+    timer.LogResponse("total=", results.size(),
+                      ", success=", results.size() - failure_count,
+                      ", failures=", failure_count);
+    return results;
+}
+
 std::vector<tl::expected<void, ErrorCode>> WrappedMasterService::BatchPutRevoke(
     const UUID& client_id, const std::vector<std::string>& keys) {
     ScopedVLogTimer timer(1, "BatchPutRevoke");
@@ -625,8 +655,15 @@ std::vector<tl::expected<void, ErrorCode>> WrappedMasterService::BatchPutRevoke(
     results.reserve(keys.size());
 
     for (const auto& key : keys) {
-        results.emplace_back(
-            master_service_.PutRevoke(client_id, key, ReplicaType::MEMORY));
+        auto mem_result =
+            master_service_.PutRevoke(client_id, key, ReplicaType::MEMORY);
+        auto disk_result =
+            master_service_.PutRevoke(client_id, key, ReplicaType::DISK);
+        if (!mem_result && !disk_result) {
+            results.emplace_back(mem_result);
+        } else {
+            results.emplace_back();
+        }
     }
 
     size_t failure_count = 0;
@@ -1022,6 +1059,8 @@ void RegisterRpcService(
     server.register_handler<&mooncake::WrappedMasterService::BatchPutStart>(
         &wrapped_master_service);
     server.register_handler<&mooncake::WrappedMasterService::BatchPutEnd>(
+        &wrapped_master_service);
+    server.register_handler<&mooncake::WrappedMasterService::BatchPutEndDisk>(
         &wrapped_master_service);
     server.register_handler<&mooncake::WrappedMasterService::BatchPutRevoke>(
         &wrapped_master_service);

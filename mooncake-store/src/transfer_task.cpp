@@ -16,7 +16,8 @@ namespace mooncake {
 // threads.
 constexpr int kDefaultFilereadWorkers = 10;
 
-FilereadWorkerPool::FilereadWorkerPool(std::shared_ptr<StorageBackend>& backend)
+FilereadWorkerPool::FilereadWorkerPool(std::shared_ptr<StorageBackend>& backend,
+                                       std::shared_ptr<KVStorageBackend>& kv_backend)
     : shutdown_(false) {
     VLOG(1) << "Creating FilereadWorkerPool with " << kDefaultFilereadWorkers
             << " workers";
@@ -27,6 +28,7 @@ FilereadWorkerPool::FilereadWorkerPool(std::shared_ptr<StorageBackend>& backend)
         workers_.emplace_back(&FilereadWorkerPool::workerThread, this);
     }
     backend_ = backend;
+    kv_backend_ = kv_backend;
 }
 
 FilereadWorkerPool::~FilereadWorkerPool() {
@@ -61,13 +63,26 @@ void FilereadWorkerPool::submitTask(FilereadTask task) {
     queue_cv_.notify_one();
 }
 
+void FilereadWorkerPool::submitBatchTask(BatchFilereadTask task) {
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        if (shutdown_.load()) {
+            LOG(WARNING)
+                << "Attempting to submit batch task to shutdown FilereadWorkerPool";
+            task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+            return;
+        }
+        task_queue_.push(std::move(task));
+    }
+    queue_cv_.notify_one();
+}
+
 void FilereadWorkerPool::workerThread() {
     VLOG(2) << "FilereadWorkerPool worker thread started";
 
     while (true) {
-        FilereadTask task("", 0, {}, nullptr);
+        std::optional<FilereadTaskVariant> task_variant;
 
-        // Wait for task or shutdown signal
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
             queue_cv_.wait(lock, [this] {
@@ -79,36 +94,85 @@ void FilereadWorkerPool::workerThread() {
             }
 
             if (!task_queue_.empty()) {
-                task = std::move(task_queue_.front());
+                task_variant = std::move(task_queue_.front());
                 task_queue_.pop();
             }
         }
 
-        // Execute the task if we have one
-        if (task.state) {
-            try {
-                if (!backend_) {
-                    LOG(ERROR)
-                        << "Backend is not initialized, cannot load object";
-                    task.state->set_completed(ErrorCode::TRANSFER_FAIL);
-                    continue;
-                }
+        if (!task_variant) continue;
 
-                auto load_result = backend_->LoadObject(
-                    task.file_path, task.slices, task.object_size);
-                if (load_result) {
-                    VLOG(2) << "Fileread task completed successfully with "
-                            << task.file_path;
-                    task.state->set_completed(ErrorCode::OK);
-                } else {
-                    LOG(ERROR)
-                        << "Fileread task failed for file: " << task.file_path
-                        << " with error: " << toString(load_result.error());
+        if (std::holds_alternative<FilereadTask>(*task_variant)) {
+            auto& task = std::get<FilereadTask>(*task_variant);
+            if (task.state) {
+                try {
+                    if (task.use_nds) {
+                        if (!kv_backend_) {
+                            LOG(ERROR) << "KV backend not initialized, cannot load NDS object";
+                            task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                            continue;
+                        }
+                        auto load_result = kv_backend_->LoadObjects(
+                            {task.nds_key}, {task.slices});
+                        if (load_result) {
+                            VLOG(2) << "NDS fileread task completed successfully for key "
+                                    << task.nds_key;
+                            task.state->set_completed(ErrorCode::OK);
+                        } else {
+                            LOG(ERROR) << "NDS fileread task failed for key: "
+                                       << task.nds_key
+                                       << " with error: " << toString(load_result.error());
+                            task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                        }
+                    } else {
+                        if (!backend_) {
+                            LOG(ERROR) << "Backend is not initialized, cannot load object";
+                            task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                            continue;
+                        }
+                        auto load_result = backend_->LoadObject(
+                            task.file_path, task.slices, task.object_size);
+                        if (load_result) {
+                            VLOG(2) << "Fileread task completed successfully with "
+                                    << task.file_path;
+                            task.state->set_completed(ErrorCode::OK);
+                        } else {
+                            LOG(ERROR) << "Fileread task failed for file: " << task.file_path
+                                       << " with error: " << toString(load_result.error());
+                            task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    LOG(ERROR) << "Exception during async fileread: " << e.what();
                     task.state->set_completed(ErrorCode::TRANSFER_FAIL);
                 }
-            } catch (const std::exception& e) {
-                LOG(ERROR) << "Exception during async fileread: " << e.what();
-                task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+            }
+        } else if (std::holds_alternative<BatchFilereadTask>(*task_variant)) {
+            auto& task = std::get<BatchFilereadTask>(*task_variant);
+            if (task.state) {
+                try {
+                    if (!kv_backend_) {
+                        LOG(ERROR) << "KV backend not initialized, cannot load NDS batch objects";
+                        task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                        continue;
+                    }
+                    VLOG(1) << "Batch NDS fileread: loading " << task.nds_keys.size()
+                            << " keys via LoadObjects";
+                    auto load_result = kv_backend_->LoadObjects(
+                        task.nds_keys, task.batched_slices);
+                    if (load_result) {
+                        VLOG(1) << "Batch NDS fileread completed successfully for "
+                                << task.nds_keys.size() << " keys";
+                        task.state->set_completed(ErrorCode::OK);
+                    } else {
+                        LOG(ERROR) << "Batch NDS fileread failed for "
+                                   << task.nds_keys.size() << " keys"
+                                   << " with error: " << toString(load_result.error());
+                        task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                    }
+                } catch (const std::exception& e) {
+                    LOG(ERROR) << "Exception during async batch fileread: " << e.what();
+                    task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+                }
             }
         }
     }
@@ -119,16 +183,25 @@ void FilereadWorkerPool::workerThread() {
 // ============================================================================
 // MemcpyWorkerPool Implementation
 // ============================================================================
-// Since memcpy is bound by memory bandwidth, we only need one worker thread.
-constexpr int kDefaultMemcpyWorkers = 1;
-
 MemcpyWorkerPool::MemcpyWorkerPool() : shutdown_(false) {
-    VLOG(1) << "Creating MemcpyWorkerPool with " << kDefaultMemcpyWorkers
+    constexpr int kDefaultMemcpyWorkers = 4;
+    int num_workers = kDefaultMemcpyWorkers;
+    const char* env_value = std::getenv("MC_MEMCPY_WORKERS");
+    if (env_value != nullptr) {
+        int parsed = std::atoi(env_value);
+        if (parsed > 0 && parsed <= 64) {
+            num_workers = parsed;
+        } else {
+            LOG(WARNING) << "Invalid MC_MEMCPY_WORKERS value: " << env_value
+                         << ", using default " << kDefaultMemcpyWorkers;
+        }
+    }
+
+    VLOG(1) << "Creating MemcpyWorkerPool with " << num_workers
             << " workers";
 
-    // Start worker threads
-    workers_.reserve(kDefaultMemcpyWorkers);
-    for (int i = 0; i < kDefaultMemcpyWorkers; ++i) {
+    workers_.reserve(num_workers);
+    for (int i = 0; i < num_workers; ++i) {
         workers_.emplace_back(&MemcpyWorkerPool::workerThread, this);
     }
 }
@@ -404,10 +477,13 @@ TransferStrategy TransferFuture::strategy() const {
 
 TransferSubmitter::TransferSubmitter(TransferEngine& engine,
                                      std::shared_ptr<StorageBackend>& backend,
+                                     std::shared_ptr<KVStorageBackend>& kv_backend,
+                                     bool use_od,
                                      TransferMetric* transfer_metric)
     : engine_(engine),
       memcpy_pool_(std::make_unique<MemcpyWorkerPool>()),
-      fileread_pool_(std::make_unique<FilereadWorkerPool>(backend)),
+      fileread_pool_(std::make_unique<FilereadWorkerPool>(backend, kv_backend)),
+      use_od_(use_od),
       transfer_metric_(transfer_metric) {
     // Read MC_STORE_MEMCPY environment variable, default to false (disabled)
     const char* env_value = std::getenv("MC_STORE_MEMCPY");
@@ -461,8 +537,11 @@ std::optional<TransferFuture> TransferSubmitter::submit(
                 LOG(ERROR) << "Unknown transfer strategy: " << strategy;
                 return std::nullopt;
         }
-    } else {
+    } else if (replica.is_disk_replica()) {
         future = submitFileReadOperation(replica, slices, op_code);
+    } else {
+        LOG(ERROR) << "Unsupported replica type (LOCAL_DISK) in TransferSubmitter::submit";
+        return std::nullopt;
     }
 
     // Update metrics on successful submission
@@ -477,7 +556,34 @@ std::optional<TransferFuture> TransferSubmitter::submit_batch(
     const std::vector<Replica::Descriptor>& replicas,
     std::vector<std::vector<Slice>>& all_slices,
     TransferRequest::OpCode op_code) {
-    std::optional<TransferFuture> future;
+    if (replicas.empty() || all_slices.empty()) return std::nullopt;
+
+    for (const auto& r : replicas) {
+        if (r.is_local_disk_replica()) {
+            LOG(ERROR) << "LOCAL_DISK replicas not supported in submit_batch";
+            return std::nullopt;
+        }
+    }
+
+    if (replicas[0].is_disk_replica() && use_od_) {
+        return submitBatchFileReadOperation(replicas, all_slices, op_code);
+    }
+
+    auto& first_mem_desc = replicas[0].get_memory_descriptor();
+    TransferStrategy strategy =
+        selectStrategy(first_mem_desc.buffer_descriptor, all_slices[0]);
+
+    if (strategy == TransferStrategy::LOCAL_MEMCPY) {
+        auto future =
+            submitBatchMemcpyOperation(replicas, all_slices, op_code);
+        if (future.has_value()) {
+            for (auto& slices : all_slices) {
+                updateTransferMetrics(slices, op_code);
+            }
+        }
+        return future;
+    }
+
     std::vector<TransferRequest> requests;
     for (size_t i = 0; i < replicas.size(); ++i) {
         auto& replica = replicas[i];
@@ -505,8 +611,7 @@ std::optional<TransferFuture> TransferSubmitter::submit_batch(
             offset += slice.size;
         }
     }
-    future = submitTransfer(requests);
-    // Update metrics on successful submission
+    auto future = submitTransfer(requests);
     if (future.has_value()) {
         for (auto& slices : all_slices) {
             updateTransferMetrics(slices, op_code);
@@ -584,6 +689,46 @@ std::optional<TransferFuture> TransferSubmitter::submitMemcpyOperation(
     VLOG(1) << "Memcpy transfer submitted to worker pool with " << slices.size()
             << " operations";
 
+    return TransferFuture(state);
+}
+
+std::optional<TransferFuture> TransferSubmitter::submitBatchMemcpyOperation(
+    const std::vector<Replica::Descriptor>& replicas,
+    const std::vector<std::vector<Slice>>& all_slices,
+    TransferRequest::OpCode op_code) {
+    auto state = std::make_shared<MemcpyOperationState>();
+    std::vector<MemcpyOperation> operations;
+
+    for (size_t i = 0; i < replicas.size(); ++i) {
+        auto& mem_desc = replicas[i].get_memory_descriptor();
+        auto& handle = mem_desc.buffer_descriptor;
+        uint64_t base_address = static_cast<uint64_t>(handle.buffer_address_);
+        uint64_t offset = 0;
+
+        for (size_t j = 0; j < all_slices[i].size(); ++j) {
+            const auto& slice = all_slices[i][j];
+            if (slice.ptr == nullptr) {
+                offset += slice.size;
+                continue;
+            }
+
+            void* dest;
+            const void* src;
+
+            if (op_code == TransferRequest::READ) {
+                dest = slice.ptr;
+                src = reinterpret_cast<const void*>(base_address + offset);
+            } else {
+                dest = reinterpret_cast<void*>(base_address + offset);
+                src = slice.ptr;
+            }
+            offset += slice.size;
+            operations.emplace_back(dest, src, slice.size);
+        }
+    }
+
+    MemcpyTask task(std::move(operations), state);
+    memcpy_pool_->submitTask(std::move(task));
     return TransferFuture(state);
 }
 
@@ -665,15 +810,45 @@ std::optional<TransferFuture> TransferSubmitter::submitFileReadOperation(
     const Replica::Descriptor& replica, std::vector<Slice>& slices,
     TransferRequest::OpCode op_code) {
     auto state = std::make_shared<FilereadOperationState>();
-    auto disk_replica = replica.get_disk_descriptor();
-    std::string file_path = disk_replica.file_path;
-    size_t file_length = disk_replica.object_size;
 
-    // Submit memcpy operations to worker pool for async execution
-    FilereadTask task(file_path, file_length, slices, state);
-    fileread_pool_->submitTask(std::move(task));
+    if (use_od_) {
+        auto nds_key = ExtractKeyFromPath(replica.get_disk_descriptor().file_path);
+        FilereadTask task(true, nds_key, slices, state);
+        fileread_pool_->submitTask(std::move(task));
+        VLOG(1) << "NDS fileread transfer submitted to worker pool for key "
+                 << nds_key;
+    } else {
+        auto disk_replica = replica.get_disk_descriptor();
+        std::string file_path = disk_replica.file_path;
+        size_t file_length = disk_replica.object_size;
+        FilereadTask task(file_path, file_length, slices, state);
+        fileread_pool_->submitTask(std::move(task));
+        VLOG(1) << "Fileread transfer submitted to worker pool with " << file_path;
+    }
 
-    VLOG(1) << "Fileread transfer submitted to worker pool with " << file_path;
+    return TransferFuture(state);
+}
+
+std::optional<TransferFuture> TransferSubmitter::submitBatchFileReadOperation(
+    const std::vector<Replica::Descriptor>& replicas,
+    std::vector<std::vector<Slice>>& all_slices,
+    TransferRequest::OpCode op_code) {
+    auto state = std::make_shared<FilereadOperationState>();
+
+    std::vector<std::string> nds_keys;
+    nds_keys.reserve(replicas.size());
+    for (const auto& replica : replicas) {
+        nds_keys.push_back(ExtractKeyFromPath(replica.get_disk_descriptor().file_path));
+    }
+
+    BatchFilereadTask task(nds_keys, all_slices, state);
+    fileread_pool_->submitBatchTask(std::move(task));
+    VLOG(1) << "Batch NDS fileread transfer submitted to worker pool for "
+             << nds_keys.size() << " keys";
+
+    for (auto& slices : all_slices) {
+        updateTransferMetrics(slices, op_code);
+    }
 
     return TransferFuture(state);
 }

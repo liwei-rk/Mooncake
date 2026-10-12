@@ -226,6 +226,9 @@ class MasterService {
     std::vector<tl::expected<void, ErrorCode>> BatchPutEnd(
         const UUID& client_id, const std::vector<std::string>& keys);
 
+    std::vector<tl::expected<void, ErrorCode>> BatchPutEndDisk(
+        const UUID& client_id, const std::vector<std::string>& keys);
+
     /**
      * @brief Revoke a batch of put operations
      * @return ErrorCode::OK on success, ErrorCode::OBJECT_NOT_FOUND if not
@@ -1037,6 +1040,8 @@ class MasterService {
     // storage backend eviction configuration
     const bool enable_disk_eviction_;
     const uint64_t quota_bytes_;
+    const bool use_od_;
+    const uint32_t nsid_;
 
     bool use_disk_replica_{false};
 

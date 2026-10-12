@@ -5,38 +5,33 @@
 #include <vector>
 
 namespace NDS {
-    /**
-     * @brief Initialize NDS KV storage
-     * @param addr Memory address for initialization
-     * @param len Length of memory region
-     * @return 0 on success, error code on failure
-     */
-    int32_t init(void* addr, uint64_t len);
+    int32_t init(void *memAddr, uint64_t length, const char *path_nds_config = nullptr);
 
-    /**
-     * @brief Check if block IDs exist in NDS KV storage
-     * @param blockIds Vector of block IDs to check
-     * @return Count of existing block IDs in the input vector
-     */
-    int32_t isExists(std::vector<uint64_t> blockIds);
+    int32_t isExists(std::vector<uint64_t> blockIds, uint32_t nsid = 0);
 
-    /**
-     * @brief Get data from NDS KV storage
-     * @param blockId Block ID to retrieve
-     * @param blockAddr Buffer to store retrieved data
-     * @param offset Offset within the block
-     * @param len Length of data to retrieve
-     * @return 0 on success, error code on failure
-     */
-    int32_t get(uint64_t blockId, uint8_t *blockAddr, size_t offset, size_t len);
+    int32_t get(uint64_t blockId, uint8_t *blockAddr, size_t offset, size_t length, uint32_t nsid);
 
-    /**
-     * @brief Put data into NDS KV storage
-     * @param blockId Block ID to store
-     * @param blockAddr Buffer containing data to store
-     * @param offset Offset within the block
-     * @param len Length of data to store
-     * @return 0 on success, error code on failure
-     */
-    int32_t put(uint64_t blockId, uint8_t *blockAddr, size_t offset, size_t len);
+    int32_t batchGet(std::vector<uint64_t> blockIds, std::vector<uint8_t *> blockAddrs,
+         std::vector<size_t> offsets, std::vector<size_t> lengths, std::vector<uint32_t> nsids);
+
+    int32_t put(uint64_t blockId, uint8_t *blockAddr, size_t offset, size_t length, uint32_t nsid);
+
+    int32_t batchPut(std::vector<uint64_t> blockIds, std::vector<uint8_t *> blockAddrs,
+         std::vector<size_t> offsets, std::vector<size_t> lengths, std::vector<uint32_t> nsids);
+}
+
+extern "C" {
+    int32_t c_init(void *memAddr, uint64_t length, const char *path_nds_config);
+
+    int32_t c_isExists(const uint64_t *blockIds, size_t count, uint32_t nsid);
+
+    int32_t c_get(uint64_t blockId, uint8_t *blockAddr, size_t offset, size_t length, uint32_t nsid);
+
+    int32_t c_batchGet(const uint64_t *blockIds, uint8_t **blockAddrs,
+         const size_t *offsets, const size_t *lengths, const uint32_t *nsids, size_t count);
+
+    int32_t c_put(uint64_t blockId, uint8_t *blockAddr, size_t offset, size_t length, uint32_t nsid);
+
+    int32_t c_batchPut(const uint64_t *blockIds, uint8_t **blockAddrs,
+         const size_t *offsets, const size_t *lengths, const uint32_t *nsids, size_t count);
 }

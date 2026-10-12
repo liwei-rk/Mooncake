@@ -180,6 +180,9 @@ class MasterClient {
     [[nodiscard]] std::vector<tl::expected<void, ErrorCode>> BatchPutEnd(
         const std::vector<std::string>& keys);
 
+    [[nodiscard]] std::vector<tl::expected<void, ErrorCode>> BatchPutEndDisk(
+        const std::vector<std::string>& keys);
+
     /**
      * @brief Revokes a put operation
      * @param key Object key
