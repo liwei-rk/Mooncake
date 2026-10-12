@@ -528,13 +528,6 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
                    << MIN_SEGMENT_SIZE << " and " << MAX_SEGMENT_SIZE;
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
-    if (local_buffer_size < MIN_SEGMENT_SIZE ||
-        local_buffer_size > MAX_SEGMENT_SIZE) {
-        LOG(ERROR) << "Invalid " << CONFIG_KEY_LOCAL_BUFFER_SIZE << ": "
-                   << local_buffer_size << ", must be between "
-                   << MIN_SEGMENT_SIZE << " and " << MAX_SEGMENT_SIZE;
-        return tl::unexpected(ErrorCode::INVALID_PARAMS);
-    }
 
     // Validate protocol is supported
     if (protocol != "tcp" && protocol != "rdma") {
