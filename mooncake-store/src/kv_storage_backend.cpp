@@ -207,7 +207,9 @@ tl::expected<std::vector<std::string>, ErrorCode> KVStorageBackend::StoreObjects
 
     for (size_t i = 0; i < keys.size(); ++i) {
         const auto& slices = batched_slices[i];
-        uint64_t blockId = objectKeyToUint64(keys[i]);
+       std::string key = ExtractKeyFromPath(keys[i]);
+        uint64_t blockId = objectKeyToUint64(key);
+        LOG(WARNING) << "NDS StoreObjects: key=" << key << " blockId=" << blockId;
         size_t total_slice_size = 0;
         for (const auto& sl : slices) total_slice_size += sl.size;
 
@@ -262,6 +264,7 @@ tl::expected<void, ErrorCode> KVStorageBackend::LoadObjects(
     for (size_t i = 0; i < keys.size(); ++i) {
         const auto& slices = batched_slices[i];
         uint64_t blockId = objectKeyToUint64(keys[i]);
+        LOG(WARNING) << "NDS LoadObjects: key=" << keys[i] << " blockId=" << blockId;
         size_t total_slice_size = 0;
         for (const auto& sl : slices) total_slice_size += sl.size;
 
