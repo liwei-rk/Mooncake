@@ -27,10 +27,16 @@ set(MOONCAKE_STORE_SOURCES
     http_metadata_server.cpp
     file_storage.cpp
     serialize/serializer.cpp
-    serialize/serializer_backend.cpp
-    ha/ha_backend_factory.cpp
-    ha/etcd_leader_coordinator.cpp
-    ha/master_service_supervisor.cpp
+    ha/leadership/leader_coordinator_factory.cpp
+    ha/leadership/backends/etcd/etcd_leader_coordinator.cpp
+    ha/common/redis/redis_connection.cpp
+    ha/leadership/backends/redis/redis_leader_coordinator.cpp
+    ha/leadership/master_service_supervisor.cpp
+    ha/snapshot/object/snapshot_object_store.cpp
+    ha/snapshot/object/backends/local/local_file_snapshot_object_store.cpp
+    ha/snapshot/object/backends/s3/s3_snapshot_object_store.cpp
+    ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store.cpp
+    ha/snapshot/catalog/backends/redis/redis_snapshot_catalog_store.cpp
     utils/type_util.cpp
     utils/file_util.cpp
     task_manager.cpp
@@ -120,41 +126,41 @@ else()
   message(STATUS "io_uring: Disabled (liburing not found)")
 endif()
 
+if(STORE_USE_REDIS)
+  list(APPEND EXTRA_LIBS ${MOONCAKE_STORE_HIREDIS_LIBRARY})
+endif()
+
 # The cache_allocator library
 include_directories(${Python3_INCLUDE_DIRS})
 add_library(mooncake_store ${MOONCAKE_STORE_SOURCES})
 target_include_directories(mooncake_store PUBLIC ${XXHASH_INCLUDE_DIR})
 target_link_libraries(mooncake_store PUBLIC ${XXHASH_LIBRARY})
-# Note: transfer_engine is PRIVATE to avoid propagating its dependencies (e.g.,
-# vendor-specific hardware) to targets that don't need it (e.g.,
-# mooncake_master). Targets that need transfer_engine should link it explicitly.
-target_link_libraries(
-  mooncake_store
-PUBLIC cachelib_memory_allocator ${ETCD_WRAPPER_LIB} glog::glog gflags::gflags
-          ${EXTRA_LIBS} asio_shared
-  PRIVATE transfer_engine)
+
+if(STORE_USE_REDIS)
+    target_include_directories(mooncake_store PRIVATE
+        ${MOONCAKE_STORE_HIREDIS_INCLUDE_DIR})
+endif()
+# Note: transfer_engine is PRIVATE to avoid propagating its dependencies (e.g., vendor-specific hardware)
+# to targets that don't need it (e.g., mooncake_master).
+# Targets that need transfer_engine should link it explicitly.
+target_link_libraries(mooncake_store
+    PUBLIC
+        cachelib_memory_allocator
+        ${ETCD_WRAPPER_LIB}
+        glog::glog
+        gflags::gflags
+        ${EXTRA_LIBS}
+        asio_shared
+    PRIVATE
+        transfer_engine
+)
 if(STORE_USE_ETCD)
-  add_dependencies(mooncake_store build_etcd_wrapper)
+    add_dependencies(mooncake_store build_etcd_wrapper)
 endif()
 
 if(URING_LIB AND URING_INCLUDE)
   target_compile_definitions(mooncake_store PUBLIC USE_URING)
   target_include_directories(mooncake_store PRIVATE ${URING_INCLUDE})
-endif()
-
-if(USE_ASCEND_DIRECT)
-  set(ACL_RUNTIME_HEADER_PATH "${ASCEND_INCLUDE_DIR}/acl/acl_rt.h")
-  if(EXISTS "${ACL_RUNTIME_HEADER_PATH}")
-    file(READ "${ACL_RUNTIME_HEADER_PATH}" ACL_RUNTIME_CONTENT)
-    if("${ACL_RUNTIME_CONTENT}" MATCHES "ACL_MEM_P2P_HUGE1G")
-      message(STATUS "ACL_MEM_P2P_HUGE1G exist.")
-      add_compile_definitions(ASCEND_SUPPORT_FABRIC_MEM)
-    else()
-      message(STATUS "ACL_MEM_P2P_HUGE1G is not exist.")
-    endif()
-  else()
-    message(WARNING "Acl runtime header file is not exist")
-  endif()
 endif()
 
 if(BUILD_SHARED_LIBS)
