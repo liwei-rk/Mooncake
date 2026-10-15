@@ -13,8 +13,8 @@
 #include <unordered_set>
 
 #include "client_metric.h"
-#include "ha/leader_coordinator.h"
 #include "kv_storage_backend.h"
+#include "ha/leadership/leader_coordinator.h"
 #include "master_client.h"
 #include "storage_backend.h"
 #include "thread_pool.h"
@@ -227,6 +227,15 @@ class Client {
      * @return tl::expected<long, ErrorCode> number of removed objects or error
      */
     tl::expected<long, ErrorCode> RemoveAll(bool force = false);
+
+    /**
+     * @brief Batch remove objects and all their replicas
+     * @param keys List of keys to remove
+     * @param force If true, skip lease and replication task checks
+     * @return Vector of expected results for each key
+     */
+    std::vector<tl::expected<void, ErrorCode>> BatchRemove(
+        const std::vector<ObjectKey>& keys, bool force = false);
 
     /**
      * @brief Notify master that a disk replica was evicted locally
@@ -483,6 +492,9 @@ class Client {
         return use_od_ ? (kv_storage_backend_ != nullptr) : (storage_backend_ != nullptr);
     }
 
+    bool IsReplicaOnLocalMemory(const Replica::Descriptor& replica);
+
+
    private:
     /**
      * @brief Private constructor to enforce creation through Create() method
@@ -635,10 +647,21 @@ void PrepareStorageBackend(const std::string& storage_root_dir,
 
     // For high availability
     std::unique_ptr<ha::LeaderCoordinator> leader_coordinator_;
-    std::thread ping_thread_;
-    std::atomic<bool> ping_running_{false};
+    std::mutex leader_switch_mutex_;
+    std::optional<ha::MasterView> current_master_view_;
+    std::string direct_master_address_;
+    std::thread leader_monitor_thread_;
+    std::atomic<bool> leader_monitor_running_{false};
+    std::thread storage_heartbeat_thread_;
+    std::atomic<bool> storage_heartbeat_running_{false};
+    std::thread task_poll_thread_;
+    std::atomic<bool> task_poll_running_{false};
     std::atomic<bool> last_ping_success_{false};
-    void PingThreadMain(std::string current_master_address);
+    ErrorCode SwitchLeader(const ha::MasterView& target_view);
+    void LeaderMonitorThreadMain();
+    void StorageHeartbeatThreadMain();
+    void TaskPollThreadMain();
+    void EnsureStorageControlPlaneStarted();
     void PollAndDispatchTasks();
     void SubmitTask(const TaskAssignment& assignment);
 
@@ -681,8 +704,6 @@ void PrepareStorageBackend(const std::string& storage_root_dir,
     tl::expected<void, ErrorCode> Move(const std::string& key,
                                        const std::string& source,
                                        const std::string& target);
-
-    bool IsReplicaOnLocalMemory(const Replica::Descriptor& replica);
 
     // Task thread pool for async task execution
     ThreadPool task_thread_pool_;
