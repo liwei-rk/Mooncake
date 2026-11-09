@@ -394,9 +394,9 @@ UringFile::UringFile(const std::string& filename, int fd,
         LOG(WARNING) << "[UringFile] thread-local ring not available for "
                      << filename;
     }
-    if (use_direct_io_) {
-        LOG(INFO) << "[UringFile] O_DIRECT mode enabled for " << filename;
-    }
+    // if (use_direct_io_) {
+    //     LOG(INFO) << "[UringFile] O_DIRECT mode enabled for " << filename;
+    // }
 }
 
 UringFile::~UringFile() {

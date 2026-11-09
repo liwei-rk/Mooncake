@@ -1014,17 +1014,17 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
             const auto& key = object_keys[i];
             const auto& query_result = query_results[i];
 
-            LOG(INFO) << "[BatchGet-Debug] key=" << key
-                      << " replica_count=" << query_result.replicas.size();
+            // LOG(INFO) << "[BatchGet-Debug] key=" << key
+            //           << " replica_count=" << query_result.replicas.size();
             for (size_t r = 0; r < query_result.replicas.size(); ++r) {
                 const auto& desc = query_result.replicas[r];
                 std::string type_str = "UNKNOWN";
                 if (desc.is_memory_replica()) type_str = "MEMORY";
                 else if (desc.is_disk_replica()) type_str = "DISK";
                 else if (desc.is_local_disk_replica()) type_str = "LOCAL_DISK";
-                LOG(INFO) << "[BatchGet-Debug] key=" << key
-                          << " replica[" << r << "] type=" << type_str
-                          << " status=" << static_cast<int>(desc.status);
+                // LOG(INFO) << "[BatchGet-Debug] key=" << key
+                //           << " replica[" << r << "] type=" << type_str
+                //           << " status=" << static_cast<int>(desc.status);
             }
 
             auto slices_it = slices.find(key);
@@ -1048,8 +1048,8 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
             if (replica.is_memory_replica()) selected_type = "MEMORY";
             else if (replica.is_disk_replica()) selected_type = "DISK";
             else if (replica.is_local_disk_replica()) selected_type = "LOCAL_DISK";
-            LOG(INFO) << "[BatchGet-Debug] key=" << key
-                      << " selected_replica=" << selected_type;
+            // LOG(INFO) << "[BatchGet-Debug] key=" << key
+            //           << " selected_replica=" << selected_type;
 
             if (replica.is_memory_replica()) {
                 bool cache_used = false;
@@ -1070,8 +1070,8 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
             }
         }
 
-        LOG(INFO) << "[BatchGet-Debug] memory_keys=" << memory_replicas.size()
-                  << " disk_keys=" << disk_replicas.size();
+        // LOG(INFO) << "[BatchGet-Debug] memory_keys=" << memory_replicas.size()
+        //           << " disk_keys=" << disk_replicas.size();
 
         std::optional<TransferFuture> mem_future;
         std::optional<TransferFuture> disk_future;
