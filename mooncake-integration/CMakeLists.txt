@@ -54,7 +54,9 @@ if (WITH_TE)
         $<TARGET_OBJECTS:rpc_communicator>
     )
 
-    target_link_libraries(engine PRIVATE ${Python3_LIBRARIES})
+    # 注释掉该行，让 pybind11 扩展模块在运行时从解释器获取 Python 符号，
+    # 不再链接静态 libpython（避免与解释器自身 libpython 产生符号冲突/多份状态）
+    # target_link_libraries(engine PRIVATE ${Python3_LIBRARIES})
     target_include_directories(engine PRIVATE ${Python3_INCLUDE_DIRS})
     if (USE_ASCEND_DIRECT)
         target_link_libraries(engine PUBLIC

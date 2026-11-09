@@ -11,6 +11,7 @@ set(MOONCAKE_STORE_SOURCES
     utils.cpp
     master_metric_manager.cpp
     storage_backend.cpp
+    kv_storage_backend.cpp
     thread_pool.cpp
     etcd_helper.cpp
     segment.cpp
@@ -134,6 +135,7 @@ include_directories(${Python3_INCLUDE_DIRS})
 add_library(mooncake_store ${MOONCAKE_STORE_SOURCES})
 target_include_directories(mooncake_store PUBLIC ${XXHASH_INCLUDE_DIR})
 target_link_libraries(mooncake_store PUBLIC ${XXHASH_LIBRARY})
+
 if(STORE_USE_REDIS)
     target_include_directories(mooncake_store PRIVATE
         ${MOONCAKE_STORE_HIREDIS_INCLUDE_DIR})
