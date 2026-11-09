@@ -2497,6 +2497,15 @@ void Client::PrepareStorageBackend(const std::string& storage_root_dir,
             LOG(ERROR) << "Failed to create storage backend";
             return;
         }
+        // Honor MOONCAKE_USE_URING for the root_fs_dir storage backend too.
+        // When enabled, reads use io_uring + O_DIRECT (bypassing the OS page
+        // cache); writes stay on the buffered path.
+        auto use_uring_str = GetEnvStringOr("MOONCAKE_USE_URING", "false");
+        storage_backend_->use_uring_ =
+            (use_uring_str == "true" || use_uring_str == "1");
+        if (storage_backend_->use_uring_) {
+            LOG(INFO) << "StorageBackend: io_uring + O_DIRECT enabled for reads";
+        }
         auto init_result = storage_backend_->Init(quota_bytes);
         if (!init_result) {
             LOG(ERROR) << "Failed to initialize StorageBackend. Error: "

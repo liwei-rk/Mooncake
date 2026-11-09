@@ -390,6 +390,58 @@ tl::expected<void, ErrorCode> StorageBackend::LoadObject(
         return tl::make_unexpected(ErrorCode::FILE_OPEN_FAIL);
     }
 
+#ifdef USE_URING
+    // O_DIRECT (use_uring_ && FileMode::Read, see create_file) requires
+    // 4096-aligned buffer/length/offset, which the caller's slices do not
+    // satisfy. Stage the whole object into an aligned buffer, then scatter
+    // the payload into the per-slice destinations (skipping null-ptr gaps).
+    if (use_uring_) {
+        auto* uring_file = dynamic_cast<UringFile*>(file.get());
+        if (uring_file == nullptr) {
+            LOG(ERROR) << "use_uring_ set but file is not UringFile: " << path;
+            return tl::make_unexpected(ErrorCode::FILE_READ_FAIL);
+        }
+        constexpr size_t kAlignment = 4096;
+        size_t aligned_len = align_up(static_cast<size_t>(length), kAlignment);
+        void* buf = nullptr;
+        if (posix_memalign(&buf, kAlignment, aligned_len) != 0) {
+            LOG(ERROR) << "Failed to allocate aligned buffer for O_DIRECT "
+                       << "read: " << path;
+            return tl::make_unexpected(ErrorCode::FILE_READ_FAIL);
+        }
+        auto read_result = uring_file->read_aligned(buf, aligned_len, 0);
+        if (!read_result) {
+            LOG(ERROR) << "read_aligned failed for: " << path
+                       << ", error: " << read_result.error();
+            free(buf);
+            return tl::make_unexpected(read_result.error());
+        }
+        if (read_result.value() < static_cast<size_t>(length)) {
+            LOG(ERROR) << "Read size mismatch for: " << path
+                       << ", expected: " << length
+                       << ", got: " << read_result.value();
+            free(buf);
+            return tl::make_unexpected(ErrorCode::FILE_READ_FAIL);
+        }
+        char* src = static_cast<char*>(buf);
+        off_t file_offset = 0;
+        for (const auto& slice : slices) {
+            if (slice.ptr != nullptr) {
+                std::memcpy(slice.ptr, src + file_offset, slice.size);
+            }
+            file_offset += slice.size;
+        }
+        free(buf);
+        if (file_offset != length) {
+            LOG(ERROR) << "Total read size mismatch for: " << path
+                       << ", expected: " << length
+                       << ", got: " << file_offset;
+            return tl::make_unexpected(ErrorCode::FILE_READ_FAIL);
+        }
+        return {};
+    }
+#endif
+
     off_t current_offset = 0;
     int64_t total_bytes_processed = 0;
 
