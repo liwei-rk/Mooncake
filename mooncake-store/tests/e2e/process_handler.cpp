@@ -140,6 +140,19 @@ bool MasterProcessHandler::start() {
         // Build command line arguments.
         std::string rpc_address_arg = "--rpc-address=0.0.0.0";
         std::string rpc_port_arg = "--rpc-port=" + std::to_string(port_);
+        // HA 模式下 master 把 master_view 写到 etcd 的
+        // "mooncake-store/<cluster_id>/master_view"；client 侧 namespace 为空，
+        // ResolveClusterNamespace 会解析成默认 "mooncake"。master 默认
+        // cluster_id 是 "mooncake_cluster"，两边 key 对不上会导致 client
+        // 永远找不到 master view，因此这里显式对齐成 "mooncake"。
+        std::string cluster_id_arg = "--cluster_id=mooncake";
+        LOG(INFO) << "[m" << index_ << "] Execl master" << " "
+                  << rpc_address_arg << " " << rpc_port_arg;
+        execl(master_path_.c_str(), master_path_.c_str(), "--enable-ha=true",
+              ("--etcd-endpoints=" + config_.etcd_endpoints).c_str(),
+              cluster_id_arg.c_str(),
+              rpc_address_arg.c_str(), rpc_port_arg.c_str(), nullptr);
+
         std::vector<std::string> args;
         args.push_back(master_path_);
         args.push_back(std::string("--enable-ha=") +
