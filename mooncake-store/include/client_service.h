@@ -520,7 +520,6 @@ class Client {
 
     bool IsReplicaOnLocalMemory(const Replica::Descriptor& replica);
 
-
    private:
     /**
      * @brief Private constructor to enforce creation through Create() method
@@ -554,18 +553,9 @@ class Client {
                                bool enable_eviction = true,
                                uint64_t quota_bytes = 0);
 
-    /**
-     * @brief Asynchronously store a single object to local file via
-     * StorageBackend. Enqueues StoreObject + PutEnd/EvictDiskReplica on
-     * write_thread_pool_. Used for non-NDS disk replicas.
-     * @param key Object key
-     * @param slices Data slices for the key
-     * @param disk_descriptor Disk descriptor for the key
-     */
-    void PutToLocalFile(const std::string& key,
+    void PutToLocalFile(const std::string& object_key,
                         const std::vector<Slice>& slices,
                         const DiskDescriptor& disk_descriptor);
-
     /**
      * @brief Initialize local hot cache
      * @return ErrorCode::OK if use local hot cache,
@@ -610,13 +600,11 @@ class Client {
                             const Replica::Descriptor& replica);
 
     /**
-     * @brief Find a supported complete replica (MEMORY or DISK) from a replica
-     * list, skipping LOCAL_DISK replicas which are not supported in current
-     * transfer paths.
+     * @brief Find the first complete replica from a replica list
      * @param replica_list List of replicas to search through
-     * @param replica the found supported complete replica
-     * @return ErrorCode::OK if found, ErrorCode::INVALID_REPLICA if no supported
-     * complete replica
+     * @param replica the first complete replica (file or memory)
+     * @return ErrorCode::OK if found, ErrorCode::INVALID_REPLICA if no complete
+     * replica
      */
     ErrorCode FindFirstCompleteReplica(
         const std::vector<Replica::Descriptor>& replica_list,
@@ -663,14 +651,13 @@ class Client {
     const std::string metadata_connstring_;
     const std::string protocol_;
 
+    // Client persistent thread pool for async operations
     ThreadPool write_thread_pool_;
     std::shared_ptr<StorageBackend> storage_backend_;
     std::shared_ptr<KVStorageBackend> kv_storage_backend_;
     bool use_od_{false};
     uint32_t nsid_{0};
     int tp_rank_{0};
-    
-    
 
     // For high availability
     std::unique_ptr<ha::LeaderCoordinator> leader_coordinator_;

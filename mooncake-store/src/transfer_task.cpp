@@ -83,6 +83,7 @@ void FilereadWorkerPool::workerThread() {
     while (true) {
         std::optional<FilereadTaskVariant> task_variant;
 
+        // Wait for task or shutdown signal
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
             queue_cv_.wait(lock, [this] {
@@ -611,6 +612,7 @@ std::optional<TransferFuture> TransferSubmitter::submit_batch(
             offset += slice.size;
         }
     }
+    // Update metrics on successful submission
     auto future = submitTransfer(requests);
     if (future.has_value()) {
         for (auto& slices : all_slices) {

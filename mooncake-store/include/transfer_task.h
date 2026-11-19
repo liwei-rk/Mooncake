@@ -377,7 +377,7 @@ struct FilereadTask {
           nds_key(key),
           object_size(0),
           slices(slices_ref),
-state(std::move(s)) {}
+          state(std::move(s)) {}
 };
 
 struct BatchFilereadTask {
@@ -393,6 +393,12 @@ struct BatchFilereadTask {
           state(std::move(s)) {}
 };
 
+/**
+ * @brief Thread pool for asynchronous memcpy operations
+ *
+ * This class manages a single worker thread that executes memcpy operations
+ * asynchronously.
+ */
 class FilereadWorkerPool {
    public:
     explicit FilereadWorkerPool(std::shared_ptr<StorageBackend>& backend,

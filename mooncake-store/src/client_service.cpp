@@ -28,6 +28,7 @@
 #include "utils.h"
 #include "rpc_types.h"
 #include "local_hot_cache.h"
+
 namespace mooncake {
 
 [[nodiscard]] size_t CalculateSliceSize(const std::vector<Slice>& slices) {
@@ -528,6 +529,9 @@ ErrorCode Client::InitTransferEngine(
 }
 
 void Client::InitTransferSubmitter() {
+    // Initialize TransferSubmitter after transfer engine is ready
+    // Keep using logical local_hostname for name-based behaviors; endpoint is
+    // used separately where needed.
     transfer_submitter_ = std::make_unique<TransferSubmitter>(
         *transfer_engine_, storage_backend_, kv_storage_backend_, use_od_,
         metrics_ ? &metrics_->transfer_metric : nullptr);
@@ -598,6 +602,7 @@ std::optional<std::shared_ptr<Client>> Client::Create(
                 LOG(INFO) << "Disk eviction enabled: "
                           << config.enable_disk_eviction;
                 LOG(INFO) << "Quota bytes: " << config.quota_bytes;
+                // Initialize storage backend with config from master
                 client->use_od_ = config.use_od;
                 client->nsid_ = config.nsid;
                 LOG(INFO) << "Use OD: " << config.use_od;
@@ -771,6 +776,7 @@ tl::expected<std::vector<std::string>, ErrorCode> Client::BatchReplicaClear(
 tl::expected<void, ErrorCode> Client::Get(const std::string& object_key,
                                           const QueryResult& query_result,
                                           std::vector<Slice>& slices) {
+    // Find the first complete replica
     Replica::Descriptor replica;
     ErrorCode err = FindFirstCompleteReplica(query_result.replicas, replica);
     if (err != ErrorCode::OK) {
@@ -780,6 +786,7 @@ tl::expected<void, ErrorCode> Client::Get(const std::string& object_key,
         return tl::unexpected(err);
     }
 
+    // Check local hot cache and update replica descriptor if cache hit
     bool cache_used = false;
     if (hot_cache_ && replica.is_memory_replica()) {
         cache_used = RedirectToHotCache(object_key, replica);
@@ -788,6 +795,7 @@ tl::expected<void, ErrorCode> Client::Get(const std::string& object_key,
     auto t0_get = std::chrono::steady_clock::now();
     err = TransferRead(replica, slices);
 
+    // Release the cache block after transfer completes (memcpy is done)
     if (hot_cache_ && cache_used) {
         hot_cache_->ReleaseHotKey(object_key);
     }
@@ -804,6 +812,9 @@ tl::expected<void, ErrorCode> Client::Get(const std::string& object_key,
         return tl::unexpected(err);
     }
 
+    // Frequency admission: only promote frequently accessed keys to hot cache.
+    // Skip when cache_used — data was already served from local cache, no need
+    // to re-promote or increment the CMS counter.
     if (ShouldAdmitToHotCache(object_key, cache_used)) {
         ProcessSlicesAsync(object_key, slices, replica);
     }
@@ -813,7 +824,7 @@ tl::expected<void, ErrorCode> Client::Get(const std::string& object_key,
                      << object_key;
         return tl::unexpected(ErrorCode::LEASE_EXPIRED);
     }
-
+    // Log cache hit statistics
     if (hot_cache_ && replica.is_memory_replica()) {
         VLOG(1) << "Get completed: key=" << object_key
                 << " cache_hit=" << (cache_used ? 1 : 0);
@@ -879,6 +890,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGetWhenPreferSameNode(
                       << " status=" << static_cast<int>(replica_list[r].status);
         }
 
+        // Check local hot cache and update replica descriptor if cache hit
         bool cache_used = false;
         if (hot_cache_ && replica.is_memory_replica()) {
             cache_used = RedirectToHotCache(key, replica);
@@ -925,6 +937,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGetWhenPreferSameNode(
         if (result != ErrorCode::OK) {
             for (size_t idx = 0; idx < op.key_indexes.size(); ++idx) {
                 auto index = op.key_indexes[idx];
+                // Release cache block even on failure (memcpy may have started)
                 if (hot_cache_ && idx < op.cache_used.size() &&
                     op.cache_used[idx]) {
                     hot_cache_->ReleaseHotKey(object_keys[index]);
@@ -940,11 +953,15 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGetWhenPreferSameNode(
                         << object_keys[index];
                 results[index] = {};
 
+                // Release the cache block after transfer completes (memcpy is
+                // done)
                 if (hot_cache_ && idx < op.cache_used.size() &&
                     op.cache_used[idx]) {
                     hot_cache_->ReleaseHotKey(object_keys[index]);
                 }
 
+                // Frequency admission: only promote frequently accessed keys.
+                // Skip when cache was used (data served from local cache).
                 if (idx < op.replicas.size() &&
                     idx < op.batched_slices.size() &&
                     ShouldAdmitToHotCache(
@@ -959,7 +976,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGetWhenPreferSameNode(
     }
     return results;
 }
-    
+
 std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
     const std::vector<std::string>& object_keys,
     const std::vector<QueryResult>& query_results,
@@ -975,6 +992,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
         return results;
     }
 
+    // Validate input size consistency
     if (query_results.size() != object_keys.size()) {
         LOG(ERROR) << "Query results size (" << query_results.size()
                    << ") doesn't match object keys size (" << object_keys.size()
@@ -1227,6 +1245,8 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
         }
     }
 
+    // As lease expired is a rare case, we check all the results with the same
+    // time_point to avoid too many syscalls
     std::chrono::steady_clock::time_point now =
         std::chrono::steady_clock::now();
     for (size_t i = 0; i < object_keys.size(); ++i) {
@@ -1244,6 +1264,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
         metrics_->transfer_metric.batch_get_latency_us.observe(us_batch_get);
     }
 
+    // Log overall cache hit statistics for the entire batch
     if (hot_cache_) {
         VLOG(1) << "BatchGet completed: num_keys=" << object_keys.size()
                 << " total_cache_hits=" << total_cache_hits;
@@ -1310,6 +1331,7 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
         return tl::unexpected(err);
     }
 
+    // Record Put transfer latency (all replicas)
     auto t0_put = std::chrono::steady_clock::now();
 
     if (use_od_) {
@@ -1336,19 +1358,24 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
     } else if (storage_backend_) {
         for (auto it = start_result.value().rbegin();
              it != start_result.value().rend(); ++it) {
-            if (it->is_disk_replica()) {
-                auto disk_descriptor = it->get_disk_descriptor();
+            const auto& replica = *it;
+            if (replica.is_disk_replica()) {
+                // Store to local file if storage backend is available
+                auto disk_descriptor = replica.get_disk_descriptor();
                 PutToLocalFile(key, slices, disk_descriptor);
-                break;
+                break;  // Only one disk replica is needed
             }
         }
     }
 
     for (const auto& replica : start_result.value()) {
         if (replica.is_memory_replica()) {
+            // Transfer data using allocated handles from all replicas
             ErrorCode transfer_err = TransferWrite(replica, slices);
             if (transfer_err != ErrorCode::OK) {
-                auto revoke_result = master_client_.PutRevoke(key, ReplicaType::MEMORY);
+                // Revoke put operation
+                auto revoke_result =
+                    master_client_.PutRevoke(key, ReplicaType::MEMORY);
                 if (!revoke_result) {
                     LOG(ERROR) << "Failed to revoke put operation";
                     return tl::unexpected(revoke_result.error());
@@ -1472,6 +1499,7 @@ void Client::StartBatchPut(std::vector<PutOperation>& ops,
     auto start_responses =
         master_client_.BatchPutStart(keys, slice_lengths, config);
 
+    // Ensure response size matches request size
     if (start_responses.size() != ops.size()) {
         LOG(ERROR) << "BatchPutStart response size mismatch: expected "
                    << ops.size() << ", got " << start_responses.size();
@@ -1489,6 +1517,8 @@ void Client::StartBatchPut(std::vector<PutOperation>& ops,
                             "Master failed to start put operation");
         } else {
             ops[i].replicas = start_responses[i].value();
+            // Operation continues to next stage - result remains INTERNAL_ERROR
+            // until fully successful
             VLOG(1) << "Successfully started put for key " << ops[i].key
                     << " with " << ops[i].replicas.size() << " replicas";
         }
@@ -1587,9 +1617,8 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                     replica, op.slices, TransferRequest::WRITE);
 
                 if (!submit_result) {
-                    failure_context =
-                        "Failed to submit transfer for replica " +
-                        std::to_string(replica_idx);
+                    failure_context = "Failed to submit transfer for replica " +
+                                      std::to_string(replica_idx);
                     all_transfers_submitted = false;
                     break;
                 }
@@ -1612,8 +1641,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                 op.pending_transfers.emplace_back(
                     TransferFuture(std::make_shared<EmptyOperationState>()));
             }
-            VLOG(1) << "Successfully submitted "
-                    << op.pending_transfers.size()
+            VLOG(1) << "Successfully submitted " << op.pending_transfers.size()
                     << " transfers for key " << op.key;
         }
     }
@@ -1638,7 +1666,7 @@ void Client::WaitForTransfers(std::vector<PutOperation>& ops) {
         size_t failed_transfer_idx = 0;
 
         for (size_t i = 0; i < op.pending_transfers.size(); ++i) {
-ErrorCode transfer_result = op.pending_transfers[i].get();
+            ErrorCode transfer_result = op.pending_transfers[i].get();
             if (transfer_result != ErrorCode::OK) {
                 if (all_transfers_succeeded) {
                     // Record the first error for reporting
@@ -2589,8 +2617,8 @@ void Client::PrepareStorageBackend(const std::string& storage_root_dir,
 }
 
 void Client::PutToLocalFile(const std::string& key,
-                             const std::vector<Slice>& slices,
-                             const DiskDescriptor& disk_descriptor) {
+                            const std::vector<Slice>& slices,
+                            const DiskDescriptor& disk_descriptor) {
     if (!storage_backend_) return;
 
     size_t total_size = 0;
@@ -2599,20 +2627,27 @@ void Client::PutToLocalFile(const std::string& key,
     }
 
     std::string path = disk_descriptor.file_path;
+    // Currently, persistence is achieved through asynchronous writes, but
+    // before asynchronous writing in 3FS, significant performance degradation
+    // may occur due to data copying. Profiling reveals that the number of page
+    // faults triggered in this scenario is nearly double the normal count.
+    // Future plans include introducing a reuse buffer list to address this
+    // performance degradation issue.
 
     std::string value;
     value.reserve(total_size);
-
     for (const auto& slice : slices) {
         value.append(static_cast<char*>(slice.ptr), slice.size);
     }
 
     write_thread_pool_.enqueue([this, backend = storage_backend_, key,
                                 value = std::move(value), path] {
+        // Store the object
         auto store_result = backend->StoreObject(path, value, key);
         ReplicaType replica_type = ReplicaType::DISK;
 
         if (!store_result) {
+            // If storage failed, revoke the put operation
             LOG(ERROR) << "Failed to store object for key: " << key;
             auto revoke_result = master_client_.PutRevoke(key, replica_type);
             if (!revoke_result) {
@@ -2621,6 +2656,7 @@ void Client::PutToLocalFile(const std::string& key,
             return;
         }
 
+        // Notify master about any evicted disk replicas (batch)
         if (!store_result.value().empty()) {
             const auto& evicted_keys = store_result.value();
             auto evict_results = master_client_.BatchEvictDiskReplica(
@@ -2635,6 +2671,7 @@ void Client::PutToLocalFile(const std::string& key,
             }
         }
 
+        // If storage succeeded, end the put operation
         auto end_result = master_client_.PutEnd(key, replica_type);
         if (!end_result) {
             LOG(ERROR) << "Failed to end put operation for key: " << key;
@@ -2973,6 +3010,7 @@ void Client::StorageHeartbeatThreadMain() {
 ErrorCode Client::FindFirstCompleteReplica(
     const std::vector<Replica::Descriptor>& replica_list,
     Replica::Descriptor& replica) {
+    // Find the first complete replica
     for (size_t i = 0; i < replica_list.size(); ++i) {
         if (replica_list[i].status == ReplicaStatus::COMPLETE &&
             !replica_list[i].is_local_disk_replica()) {
@@ -2981,6 +3019,7 @@ ErrorCode Client::FindFirstCompleteReplica(
         }
     }
 
+    // No complete replica found
     return ErrorCode::INVALID_REPLICA;
 }
 
