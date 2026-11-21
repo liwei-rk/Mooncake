@@ -97,6 +97,24 @@ class RealClient : public PyClient {
     int unregister_buffer(void *buffer);
 
     /**
+     * @brief Register multiple memory buffers in batch
+     * @param buffers Vector of pointers to the memory buffers
+     * @param sizes Vector of sizes of the buffers
+     * @return 0 on success, negative value on error
+     * @note Equivalent to register_buffer() for each buffer, but the
+     * underlying registration is performed in a single batch
+     */
+    int register_buffer_batch(const std::vector<void *> &buffers,
+                              const std::vector<size_t> &sizes);
+
+    /**
+     * @brief Unregister multiple memory buffers in batch
+     * @param buffers Vector of pointers to the memory buffers
+     * @return 0 on success, negative value on error
+     */
+    int unregister_buffer_batch(const std::vector<void *> &buffers);
+
+    /**
      * @brief Get object data directly into a pre-allocated buffer
      * @param key Key of the object to get
      * @param buffer Pointer to the pre-allocated buffer (must be registered
@@ -434,7 +452,13 @@ class RealClient : public PyClient {
             nullptr);
 
     tl::expected<void, ErrorCode> register_buffer_internal(void *buffer,
-                                                           size_t size);
+                                                            size_t size);
+
+    tl::expected<void, ErrorCode> register_buffer_batch_internal(
+        const std::vector<void *> &buffers, const std::vector<size_t> &sizes);
+
+    tl::expected<void, ErrorCode> unregister_buffer_batch_internal(
+        const std::vector<void *> &buffers);
 
     tl::expected<int64_t, ErrorCode> get_into_internal(const std::string &key,
                                                        void *buffer,

@@ -7,6 +7,8 @@
 namespace NDS {
     int32_t init(void *memAddr, uint64_t length, const char *path_nds_config = nullptr);
 
+    int32_t initMulti(std::vector<void*> memAddrs, std::vector<uint64_t> lengths, const char *path_nds_config = nullptr);
+
     int32_t isExists(std::vector<uint64_t> blockIds, uint32_t nsid = 0);
 
     int32_t get(uint64_t blockId, uint8_t *blockAddr, size_t offset, size_t length, uint32_t nsid);
@@ -22,6 +24,9 @@ namespace NDS {
 
 extern "C" {
     int32_t c_init(void *memAddr, uint64_t length, const char *path_nds_config);
+
+    int32_t c_init_multi(const void *const *memAddrs, const uint64_t *lengths, size_t count, const char *path_nds_config);
+
 
     int32_t c_isExists(const uint64_t *blockIds, size_t count, uint32_t nsid);
 

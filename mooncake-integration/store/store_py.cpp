@@ -1656,6 +1656,39 @@ PYBIND11_MODULE(store, m) {
             "Unregister a previously registered memory "
             "buffer for direct access operations")
         .def(
+            "register_buffer_batch",
+            [](MooncakeStorePyWrapper &self,
+               const std::vector<uintptr_t> &buffer_ptrs,
+               const std::vector<size_t> &sizes) {
+                // Register multiple memory buffers in batch
+                std::vector<void *> buffers;
+                buffers.reserve(buffer_ptrs.size());
+                for (uintptr_t ptr : buffer_ptrs) {
+                    buffers.push_back(reinterpret_cast<void *>(ptr));
+                }
+                py::gil_scoped_release release;
+                return self.store_->register_buffer_batch(buffers, sizes);
+            },
+            py::arg("buffer_ptrs"), py::arg("sizes"),
+            "Register multiple memory buffers in batch for direct access "
+            "operations")
+        .def(
+            "unregister_buffer_batch",
+            [](MooncakeStorePyWrapper &self,
+               const std::vector<uintptr_t> &buffer_ptrs) {
+                // Unregister multiple memory buffers in batch
+                std::vector<void *> buffers;
+                buffers.reserve(buffer_ptrs.size());
+                for (uintptr_t ptr : buffer_ptrs) {
+                    buffers.push_back(reinterpret_cast<void *>(ptr));
+                }
+                py::gil_scoped_release release;
+                return self.store_->unregister_buffer_batch(buffers);
+            },
+            py::arg("buffer_ptrs"),
+            "Unregister multiple previously registered memory buffers in "
+            "batch for direct access operations")
+        .def(
             "get_into",
             [](MooncakeStorePyWrapper &self, const std::string &key,
                uintptr_t buffer_ptr, size_t size) {

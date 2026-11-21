@@ -10,6 +10,8 @@ namespace mooncake {
 namespace {
 
 typedef int32_t (*NDS_init_fn)(void*, uint64_t, const char*);
+typedef int32_t (*NDS_initMulti_fn)(const void *const *, const uint64_t *,
+                                    size_t, const char*);
 typedef int32_t (*NDS_isExists_fn)(const uint64_t*, size_t, uint32_t);
 typedef int32_t (*NDS_get_fn)(uint64_t, uint8_t*, size_t, size_t, uint32_t);
 typedef int32_t (*NDS_put_fn)(uint64_t, uint8_t*, size_t, size_t, uint32_t);
@@ -21,6 +23,7 @@ typedef int32_t (*NDS_batchPut_fn)(const uint64_t*, uint8_t**,
 struct NDSLoader {
     void* handle = nullptr;
     NDS_init_fn init = nullptr;
+    NDS_initMulti_fn initMulti = nullptr;
     NDS_isExists_fn isExists = nullptr;
     NDS_get_fn get = nullptr;
     NDS_put_fn put = nullptr;
@@ -55,6 +58,18 @@ struct NDSLoader {
         init = (NDS_init_fn)dlsym(handle, "c_init");
         const char* dlsym_error = dlerror();
         if (dlsym_error) { LOG(ERROR) << "dlsym 'c_init' failed: " << dlsym_error; }
+
+        dlerror();
+        initMulti = (NDS_initMulti_fn)dlsym(handle, "c_init_multi");
+        dlsym_error = dlerror();
+        if (dlsym_error || !initMulti) {
+            // Optional: older NDS libraries do not export c_init_multi
+            LOG(WARNING) << "dlsym 'c_init_multi' unavailable, "
+                            "multi-region init will fall back to single-region "
+                            "init: "
+                         << (dlsym_error ? dlsym_error : "symbol is NULL");
+            initMulti = nullptr;
+        }
 
         dlerror();
         isExists = (NDS_isExists_fn)dlsym(handle, "c_isExists");
@@ -171,6 +186,78 @@ tl::expected<void, ErrorCode> KVStorageBackend::Init(void* nds_mem_addr,
             loader.nds_initialized = true;
             loader.nds_mem_addr = nds_mem_addr_;
             loader.nds_mem_size = nds_mem_size_;
+        }
+    } else {
+        nds_mem_addr_ = loader.nds_mem_addr;
+        nds_mem_size_ = loader.nds_mem_size;
+        LOG(INFO) << "NDS KV storage already initialized, reusing existing instance";
+    }
+
+    initialized_.store(true, std::memory_order_release);
+    return {};
+}
+
+tl::expected<void, ErrorCode> KVStorageBackend::InitMulti(
+    const std::vector<void*>& mem_addrs,
+    const std::vector<uint64_t>& mem_sizes) {
+    if (initialized_.load(std::memory_order_acquire)) {
+        LOG(WARNING) << "KVStorageBackend is already initialized. Skipping.";
+        return {};
+    }
+
+    if (mem_addrs.empty() || mem_addrs.size() != mem_sizes.size()) {
+        LOG(ERROR) << "Invalid memory regions for InitMulti: addrs="
+                   << mem_addrs.size() << " sizes=" << mem_sizes.size();
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    for (size_t i = 0; i < mem_addrs.size(); ++i) {
+        if (!mem_addrs[i] || mem_sizes[i] == 0) {
+            LOG(ERROR) << "Invalid memory region " << i
+                       << " for InitMulti: addr=" << mem_addrs[i]
+                       << " size=" << mem_sizes[i];
+            return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+        }
+    }
+
+    bool nds_loaded = NDSLoader::Instance().Load();
+    if (!nds_loaded) {
+        LOG(ERROR) << "KVStorageBackend requires NDS library but failed to load";
+        return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+    }
+
+    auto& loader = NDSLoader::Instance();
+
+    if (!loader.nds_initialized) {
+        if (loader.initMulti) {
+            // c_init_multi takes const void*const* — void** does not
+            // implicitly convert, so build a const view of the addresses.
+            std::vector<const void*> addrs(mem_addrs.begin(), mem_addrs.end());
+            std::vector<uint64_t> sizes = mem_sizes;
+            int32_t result =
+                loader.initMulti(addrs.data(), sizes.data(), addrs.size(),
+                                 loader.nds_config_path.c_str());
+            if (result != 0) {
+                LOG(ERROR) << "Failed to initialize NDS KV storage with "
+                              "multiple memory regions: "
+                           << result;
+                return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+            }
+            uint64_t total_size = 0;
+            for (auto size : mem_sizes) total_size += size;
+            LOG(INFO) << "NDS KV storage initialized with "
+                      << mem_addrs.size()
+                      << " memory regions, total size: " << total_size
+                      << " bytes";
+            nds_mem_addr_ = mem_addrs[0];
+            nds_mem_size_ = mem_sizes[0];
+            owns_nds_memory_ = false;
+            loader.nds_initialized = true;
+            loader.nds_mem_addr = mem_addrs[0];
+            loader.nds_mem_size = mem_sizes[0];
+        } else {
+            LOG(WARNING) << "NDS library does not support initMulti, falling "
+                            "back to single-region init with the first region";
+            return Init(mem_addrs[0], mem_sizes[0]);
         }
     } else {
         nds_mem_addr_ = loader.nds_mem_addr;

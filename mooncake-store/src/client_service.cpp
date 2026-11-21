@@ -2213,6 +2213,60 @@ tl::expected<void, ErrorCode> Client::unregisterLocalMemory(
     return {};
 }
 
+tl::expected<void, ErrorCode> Client::RegisterLocalMemoryBatch(
+    const std::vector<BufferEntry>& buffer_list,
+    const std::string& location) {
+    if (buffer_list.empty()) {
+        LOG(ERROR) << "buffer_list is empty";
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    for (const auto& buffer : buffer_list) {
+        auto check_result =
+            CheckRegisterMemoryParams(buffer.addr, buffer.length);
+        if (!check_result) {
+            LOG(ERROR) << "Invalid buffer entry in batch registration: addr="
+                       << buffer.addr << " length=" << buffer.length;
+            return tl::unexpected(check_result.error());
+        }
+    }
+    if (this->transfer_engine_->registerLocalMemoryBatch(buffer_list,
+                                                          location) != 0) {
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    if (use_od_ && kv_storage_backend_ && !kv_storage_backend_->isInitialized()) {
+        std::vector<void*> nds_addrs;
+        std::vector<uint64_t> nds_sizes;
+        nds_addrs.reserve(buffer_list.size());
+        nds_sizes.reserve(buffer_list.size());
+        for (const auto& buffer : buffer_list) {
+            nds_addrs.push_back(buffer.addr);
+            nds_sizes.push_back(buffer.length);
+        }
+        auto init_result = kv_storage_backend_->InitMulti(nds_addrs, nds_sizes);
+        if (!init_result) {
+            LOG(ERROR) << "Failed to initialize KVStorageBackend in "
+                          "RegisterLocalMemoryBatch: "
+                       << init_result.error();
+        }
+    }
+    return {};
+}
+
+tl::expected<void, ErrorCode> Client::unregisterLocalMemoryBatch(
+    const std::vector<void*>& addr_list) {
+    if (addr_list.empty()) {
+        LOG(ERROR) << "addr_list is empty";
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    if (this->transfer_engine_->unregisterLocalMemoryBatch(addr_list) != 0) {
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    if (use_od_ && kv_storage_backend_ && kv_storage_backend_->isInitialized()) {
+        kv_storage_backend_->CleanupNDS();
+    }
+    return {};
+}
+
 tl::expected<bool, ErrorCode> Client::IsExist(const std::string& key) {
     auto result = master_client_.ExistKey(key);
     return result;

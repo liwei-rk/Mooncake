@@ -512,6 +512,40 @@ int DummyClient::unregister_buffer(void* buffer) {
     return to_py_ret(ret);
 }
 
+int DummyClient::register_buffer_batch(const std::vector<void*>& buffers,
+                                       const std::vector<size_t>& sizes) {
+    if (buffers.empty() || buffers.size() != sizes.size()) {
+        LOG(ERROR) << "Invalid buffers/sizes for batch registration: buffers="
+                   << buffers.size() << " sizes=" << sizes.size();
+        return -1;
+    }
+    for (size_t i = 0; i < buffers.size(); ++i) {
+        int ret = register_buffer(buffers[i], sizes[i]);
+        if (ret != 0) {
+            LOG(ERROR) << "Failed to register buffer " << i << " (addr="
+                       << buffers[i] << ") in batch registration";
+            return ret;
+        }
+    }
+    return 0;
+}
+
+int DummyClient::unregister_buffer_batch(const std::vector<void*>& buffers) {
+    if (buffers.empty()) {
+        LOG(ERROR) << "Invalid buffer list for batch unregistration";
+        return -1;
+    }
+    for (size_t i = 0; i < buffers.size(); ++i) {
+        int ret = unregister_buffer(buffers[i]);
+        if (ret != 0) {
+            LOG(ERROR) << "Failed to unregister buffer " << i << " (addr="
+                       << buffers[i] << ") in batch unregistration";
+            return ret;
+        }
+    }
+    return 0;
+}
+
 uint64_t DummyClient::alloc_from_mem_pool(size_t size) {
     try {
         void* addr = shm_helper_->allocate(size);

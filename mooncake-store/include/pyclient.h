@@ -156,6 +156,12 @@ class PyClient {
 
     virtual int unregister_buffer(void *buffer) = 0;
 
+    virtual int register_buffer_batch(const std::vector<void *> &buffers,
+                                      const std::vector<size_t> &sizes) = 0;
+
+    virtual int unregister_buffer_batch(
+        const std::vector<void *> &buffers) = 0;
+
     virtual int64_t get_into(const std::string &key, void *buffer,
                              size_t size) = 0;
 

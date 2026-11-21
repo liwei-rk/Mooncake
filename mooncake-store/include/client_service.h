@@ -290,6 +290,24 @@ class Client {
         void* addr, bool update_metadata = true);
 
     /**
+     * @brief Registers multiple memory buffers with TransferEngine in batch
+     * @param buffer_list List of memory regions (addr + length) to register
+     * @param location Device location (e.g. "cpu:0")
+     * @return ErrorCode indicating success/failure
+     */
+    tl::expected<void, ErrorCode> RegisterLocalMemoryBatch(
+        const std::vector<BufferEntry>& buffer_list,
+        const std::string& location = kWildcardLocation);
+
+    /**
+     * @brief Unregisters multiple memory buffers from TransferEngine in batch
+     * @param addr_list Memory addresses to unregister
+     * @return ErrorCode indicating success/failure
+     */
+    tl::expected<void, ErrorCode> unregisterLocalMemoryBatch(
+        const std::vector<void*>& addr_list);
+
+    /**
      * @brief Checks if an object exists
      * @param key Key to check
      * @return ErrorCode::OK if exists, ErrorCode::OBJECT_NOT_FOUND if not

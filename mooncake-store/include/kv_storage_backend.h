@@ -22,6 +22,18 @@ class KVStorageBackend {
     tl::expected<void, ErrorCode> Init(void* nds_mem_addr = nullptr,
                                        uint64_t nds_mem_size = 0);
 
+    /**
+     * @brief Initialize NDS KV storage with multiple external memory regions
+     * @param mem_addrs Addresses of the memory regions
+     * @param mem_sizes Sizes of the memory regions in bytes
+     * @return ErrorCode indicating success/failure
+     * @note Falls back to single-region Init() with the first region when the
+     * underlying NDS library does not export initMulti
+     */
+    tl::expected<void, ErrorCode> InitMulti(
+        const std::vector<void*>& mem_addrs,
+        const std::vector<uint64_t>& mem_sizes);
+
     void CleanupNDS();
 
     bool isInitialized() const {

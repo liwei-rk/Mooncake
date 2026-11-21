@@ -2,6 +2,7 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
+#include <cstring>
 #include <memory>
 #include <string>
 #include <random>
@@ -988,6 +989,78 @@ TEST_F(RealClientTest, ErrBufferRegistrationErrors) {
         // Cleanup
         EXPECT_EQ(py_client_->unregister_buffer(buf), 0)
             << "Unregistration should succeed";
+    }
+}
+
+// Batched buffer registration/unregistration
+TEST_F(RealClientTest, BatchBufferRegistration) {
+    ASSERT_TRUE(master_.Start(InProcMasterConfigBuilder().build()));
+    master_address_ = master_.master_address();
+
+    const std::string rdma_devices = (FLAGS_protocol == std::string("rdma"))
+                                         ? FLAGS_device_name
+                                         : std::string("");
+    ASSERT_EQ(
+        py_client_->setup_real("localhost:17813", "P2PHANDSHAKE",
+                               16 * 1024 * 1024, 16 * 1024 * 1024,
+                               FLAGS_protocol, rdma_devices, master_address_),
+        0);
+
+    std::vector<std::vector<char>> buffers(4, std::vector<char>(1024));
+    std::vector<void*> addrs;
+    std::vector<size_t> sizes;
+    for (auto& buffer : buffers) {
+        addrs.push_back(buffer.data());
+        sizes.push_back(buffer.size());
+    }
+
+    // Mismatched buffer/size counts should fail
+    {
+        GLogMuter muter;
+        std::vector<size_t> bad_sizes = sizes;
+        bad_sizes.pop_back();
+        EXPECT_NE(py_client_->register_buffer_batch(addrs, bad_sizes), 0)
+            << "Batch registration with mismatched sizes should fail";
+    }
+
+    // Batch registration should succeed
+    EXPECT_EQ(py_client_->register_buffer_batch(addrs, sizes), 0)
+        << "Batch registration should succeed";
+
+    // Duplicate batch registration of the same buffers should fail
+    {
+        GLogMuter muter;
+        EXPECT_NE(py_client_->register_buffer_batch(addrs, sizes), 0)
+            << "Duplicate batch registration should fail";
+    }
+
+    // Registered buffers can be used for zero-copy put/get
+    {
+        const std::string key = "batch_buffer_registration_key";
+        std::string test_data(1024, 'B');
+        std::copy(test_data.begin(), test_data.end(), buffers[0].begin());
+        EXPECT_EQ(py_client_->put_from(key, buffers[0].data(),
+                                       buffers[0].size(), ReplicateConfig{}),
+                  0)
+            << "put_from with batch-registered buffer should succeed";
+        EXPECT_EQ(py_client_->get_into(key, buffers[1].data(),
+                                       buffers[1].size()),
+                  static_cast<int64_t>(buffers[1].size()))
+            << "get_into with batch-registered buffer should succeed";
+        EXPECT_EQ(0, memcmp(buffers[1].data(), test_data.data(), test_data.size()))
+            << "Retrieved data should match";
+        EXPECT_EQ(py_client_->remove(key), 0) << "Remove should succeed";
+    }
+
+    // Batch unregistration should succeed
+    EXPECT_EQ(py_client_->unregister_buffer_batch(addrs), 0)
+        << "Batch unregistration should succeed";
+
+    // Unregistering the same buffers again should fail
+    {
+        GLogMuter muter;
+        EXPECT_NE(py_client_->unregister_buffer_batch(addrs), 0)
+            << "Unregistering unknown buffers should fail";
     }
 }
 

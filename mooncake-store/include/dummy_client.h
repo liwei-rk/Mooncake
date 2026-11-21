@@ -48,6 +48,11 @@ class DummyClient : public PyClient {
 
     int unregister_buffer(void *buffer);
 
+    int register_buffer_batch(const std::vector<void *> &buffers,
+                              const std::vector<size_t> &sizes);
+
+    int unregister_buffer_batch(const std::vector<void *> &buffers);
+
     int64_t get_into(const std::string &key, void *buffer, size_t size);
 
     std::vector<int64_t> batch_get_into(const std::vector<std::string> &keys,

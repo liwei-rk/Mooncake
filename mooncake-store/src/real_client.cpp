@@ -1976,6 +1976,53 @@ int RealClient::register_buffer(void *buffer, size_t size) {
     return to_py_ret(register_buffer_internal(buffer, size));
 }
 
+tl::expected<void, ErrorCode> RealClient::register_buffer_batch_internal(
+    const std::vector<void *> &buffers, const std::vector<size_t> &sizes) {
+    if (!client_) {
+        LOG(ERROR) << "Client is not initialized";
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    if (buffers.empty() || buffers.size() != sizes.size()) {
+        LOG(ERROR) << "Invalid buffers/sizes for batch registration: buffers="
+                   << buffers.size() << " sizes=" << sizes.size();
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    std::vector<BufferEntry> buffer_list;
+    buffer_list.reserve(buffers.size());
+    for (size_t i = 0; i < buffers.size(); ++i) {
+        buffer_list.push_back(BufferEntry{buffers[i], sizes[i]});
+    }
+    return client_->RegisterLocalMemoryBatch(buffer_list, kWildcardLocation);
+}
+
+int RealClient::register_buffer_batch(const std::vector<void *> &buffers,
+                                      const std::vector<size_t> &sizes) {
+    return to_py_ret(register_buffer_batch_internal(buffers, sizes));
+}
+
+tl::expected<void, ErrorCode> RealClient::unregister_buffer_batch_internal(
+    const std::vector<void *> &buffers) {
+    if (!client_) {
+        LOG(ERROR) << "Client is not initialized";
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    if (buffers.empty()) {
+        LOG(ERROR) << "Invalid buffer list for batch unregistration";
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    auto unregister_result = client_->unregisterLocalMemoryBatch(buffers);
+    if (!unregister_result) {
+        LOG(ERROR) << "Unregister buffer batch failed with error: "
+                   << toString(unregister_result.error());
+        return tl::unexpected(unregister_result.error());
+    }
+    return {};
+}
+
+int RealClient::unregister_buffer_batch(const std::vector<void *> &buffers) {
+    return to_py_ret(unregister_buffer_batch_internal(buffers));
+}
+
 tl::expected<void, ErrorCode> RealClient::unregister_buffer_internal(
     void *buffer) {
     if (!client_) {
