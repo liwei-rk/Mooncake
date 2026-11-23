@@ -1505,11 +1505,12 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
         return;
     }
 
-    // NDS: fire-and-forget async batched disk write via write_thread_pool_
-    // Memory transfer success/failure is independent of NDS write.
-    // If NDS write succeeds: DISK replica is finalized via BatchPutEndDisk.
-    // If NDS write fails: DISK replica is revoked via PutRevoke(DISK),
-    // but MEMORY replica (if successful) remains valid.
+    // NDS: batched disk write runs on write_thread_pool_ concurrently with
+    // memory transfers, but its completion is tracked by nds_state, so
+    // WaitForTransfers blocks until the NDS write finishes. DISK replicas
+    // are finalized (BatchPutEndDisk) or revoked (BatchPutRevoke) by the
+    // caller after the wait, making BatchPut synchronous w.r.t. NDS writes.
+    std::shared_ptr<NdsWriteOperationState> nds_state;
     if (use_od_) {
         std::vector<std::string> nds_keys;
         std::vector<std::vector<Slice>> nds_slices;
@@ -1537,57 +1538,15 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
         }
 
         if (!nds_keys.empty()) {
+            nds_state = std::make_shared<NdsWriteOperationState>();
             write_thread_pool_.enqueue(
                 [this, b_keys = std::move(nds_keys),
-                 b_slices = std::move(nds_slices)]() mutable {
+                 b_slices = std::move(nds_slices),
+                 state = nds_state]() mutable {
                     auto nds_result = kv_storage_backend_->StoreObjects(
                         b_keys, b_slices);
-                    if (!nds_result) {
-                        LOG(ERROR) << "NDS StoreObjects batch failed for "
-                                   << b_keys.size() << " keys";
-                        for (size_t j = 0; j < b_keys.size(); ++j) {
-                            auto revoke_result = master_client_.PutRevoke(
-                                b_keys[j], ReplicaType::DISK);
-                            if (!revoke_result) {
-                                LOG(ERROR)
-                                    << "Failed to revoke DISK put for key: "
-                                    << b_keys[j];
-                            }
-                        }
-                        return;
-                    }
-                    auto end_results =
-                        master_client_.BatchPutEndDisk(b_keys);
-                    if (end_results.size() != b_keys.size()) {
-                        LOG(ERROR)
-                            << "BatchPutEndDisk response size mismatch";
-                        for (size_t j = 0; j < b_keys.size(); ++j) {
-                            auto revoke_result = master_client_.PutRevoke(
-                                b_keys[j], ReplicaType::DISK);
-                            if (!revoke_result) {
-                                LOG(ERROR)
-                                    << "Failed to revoke DISK put for key: "
-                                    << b_keys[j];
-                            }
-                        }
-                        return;
-                    }
-                    for (size_t j = 0; j < b_keys.size(); ++j) {
-                        if (!end_results[j]) {
-                            LOG(ERROR) << "BatchPutEndDisk failed for key "
-                                       << b_keys[j];
-                            auto revoke_result = master_client_.PutRevoke(
-                                b_keys[j], ReplicaType::DISK);
-                            if (!revoke_result) {
-                                LOG(ERROR)
-                                    << "Failed to revoke DISK put for key: "
-                                    << b_keys[j];
-                            }
-                        } else {
-                            VLOG(1) << "NDS write completed for key "
-                                    << b_keys[j];
-                        }
-                    }
+                    state->set_completed(
+                        nds_result ? ErrorCode::OK : nds_result.error());
                 });
         }
     }
@@ -1646,7 +1605,10 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
             op.SetError(ErrorCode::TRANSFER_FAIL, failure_context);
             op.pending_transfers.clear();
         } else {
-            if (has_disk_replica && op.pending_transfers.empty()) {
+            if (use_od_ && has_disk_replica && nds_state) {
+                // Track the NDS write so WaitForTransfers blocks on it
+                op.pending_transfers.emplace_back(TransferFuture(nds_state));
+            } else if (has_disk_replica && op.pending_transfers.empty()) {
                 op.pending_transfers.emplace_back(
                     TransferFuture(std::make_shared<EmptyOperationState>()));
             }
@@ -1770,6 +1732,55 @@ void Client::FinalizeBatchPut(std::vector<PutOperation>& ops) {
                     ops[op_idx].SetSuccess();
                     VLOG(1) << "Successfully completed put for key "
                             << successful_keys[i];
+                }
+            }
+        }
+    }
+
+    // NDS mode: finalize DISK replicas now that their writes are known to
+    // have completed (WaitForTransfers blocked on them). Ops whose MEMORY
+    // finalization already failed are skipped.
+    if (use_od_) {
+        std::vector<std::string> disk_keys;
+        std::vector<size_t> disk_op_indices;
+        for (size_t idx : successful_indices) {
+            if (!ops[idx].IsSuccessful()) {
+                continue;
+            }
+            const auto& op = ops[idx];
+            for (const auto& replica : op.replicas) {
+                if (replica.is_disk_replica()) {
+                    disk_keys.emplace_back(op.key);
+                    disk_op_indices.emplace_back(idx);
+                    break;
+                }
+            }
+        }
+
+        if (!disk_keys.empty()) {
+            auto end_disk_responses =
+                master_client_.BatchPutEndDisk(disk_keys);
+            if (end_disk_responses.size() != disk_keys.size()) {
+                LOG(ERROR) << "BatchPutEndDisk response size mismatch: expected "
+                           << disk_keys.size() << ", got "
+                           << end_disk_responses.size();
+                for (size_t idx : disk_op_indices) {
+                    ops[idx].SetError(ErrorCode::RPC_FAIL,
+                                      "BatchPutEndDisk response size mismatch");
+                }
+            } else {
+                for (size_t i = 0; i < end_disk_responses.size(); ++i) {
+                    const size_t op_idx = disk_op_indices[i];
+                    if (!end_disk_responses[i]) {
+                        LOG(ERROR) << "Failed to finalize disk put for key "
+                                   << disk_keys[i] << ": "
+                                   << toString(end_disk_responses[i].error());
+                        ops[op_idx].SetError(end_disk_responses[i].error(),
+                                             "BatchPutEndDisk failed");
+                    } else {
+                        VLOG(1) << "Successfully completed disk put for key "
+                                << disk_keys[i];
+                    }
                 }
             }
         }

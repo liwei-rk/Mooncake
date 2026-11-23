@@ -30,7 +30,8 @@ enum class TransferStrategy {
     LOCAL_MEMCPY = 0,     // Local memory copy using memcpy
     TRANSFER_ENGINE = 1,  // Remote transfer using transfer engine
     FILE_READ = 2,        // File read operation
-    EMPTY = 3
+    NDS_WRITE = 3,        // Batched NDS KV storage write
+    EMPTY = 4
 };
 
 /**
@@ -45,6 +46,8 @@ inline std::ostream& operator<<(std::ostream& os,
             return os << "TRANSFER_ENGINE";
         case TransferStrategy::FILE_READ:
             return os << "FILE_READ";
+        case TransferStrategy::NDS_WRITE:
+            return os << "NDS_WRITE";
         default:
             return os << "UNKNOWN";
     }
@@ -113,6 +116,38 @@ class EmptyOperationState : public OperationState {
 
     TransferStrategy get_strategy() const override {
         return TransferStrategy::EMPTY;
+    }
+};
+
+/**
+ * @brief Operation state for batched NDS disk writes
+ *
+ * The write runs on write_thread_pool_; the worker thread reports the
+ * result via set_completed(), while the caller blocks in
+ * wait_for_completion() until the NDS write finishes.
+ */
+class NdsWriteOperationState : public OperationState {
+   public:
+    bool is_completed() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return result_.has_value();
+    }
+
+    void set_completed(ErrorCode error_code) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            result_.emplace(error_code);
+        }
+        cv_.notify_all();
+    }
+
+    void wait_for_completion() override {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this] { return result_.has_value(); });
+    }
+
+    TransferStrategy get_strategy() const override {
+        return TransferStrategy::NDS_WRITE;
     }
 };
 
