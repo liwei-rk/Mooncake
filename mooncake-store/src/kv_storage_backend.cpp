@@ -26,6 +26,69 @@ typedef int32_t (*NDS_batchPutSegs_fn)(const uint64_t*, size_t,
                                        const uint32_t *, uint8_t**, const size_t*,
                                        const uint32_t*);
 
+std::string Trim(const std::string& str) {
+    const char* kWhitespace = " \t\r\n";
+    size_t begin = str.find_first_not_of(kWhitespace);
+    if (begin == std::string::npos) return "";
+    size_t end = str.find_last_not_of(kWhitespace);
+    return str.substr(begin, end - begin + 1);
+}
+
+std::string ResolveNdsConfigPath(int tp_rank) {
+    constexpr const char* kDefaultConfigPath = "nds_config.conf";
+
+    const char* env_config = std::getenv("MC_NDS_CONFIG");
+    if (!env_config || env_config[0] == '\0') {
+        return kDefaultConfigPath;
+    }
+
+    std::string raw(env_config);
+    if (raw.find('=') == std::string::npos) {
+        // Legacy format: the variable holds the config path directly.
+        return raw;
+    }
+
+    std::string target;
+    bool found = false;
+    size_t pos = 0;
+    while (pos <= raw.size()) {
+        size_t comma = raw.find(',', pos);
+        std::string entry =
+            raw.substr(pos, comma == std::string::npos ? std::string::npos
+                                                       : comman - pos);
+        pos = (comma == std::string::npos) ? raw.size() + 1 : comma + 1;
+
+        entry = Trim(entry);
+        if (entry.empty()) continue;
+
+        size_t eq = entry.find('=');
+        if (eq == std::string::npos) {
+            LOG(WARNING) << "Ignoring malformed MC_NDS_CONFIG entry: '" << entry
+                         << "'";
+            continue;
+        }
+
+        std::string rank_str = Trim(entry.substr(0, eq));
+        std::string path = Trim(entry.substr(eq + 1));
+        if (rank_str.empty() || path.empty()) {
+            LOG(WARNING) << "Ignoring malformed MC_NDS_CONFIG entry: '" << entry
+                         << "'";
+            continue;
+        }
+
+        if (rank == tp_rank) {
+            target = path;
+            found = true;
+        }
+    }
+
+    if (found) return target;
+
+    LOG(WARNING) << "MC_NDS_CONFIG has no valid entry for tp_rank " << tp_rank
+                 << ", falling back to " << kDefaultConfigPath;
+    return kDefaultConfigPath;
+}
+
 struct NDSLoader {
     void* handle = nullptr;
     NDS_init_fn init = nullptr;
@@ -47,14 +110,13 @@ struct NDSLoader {
         return instance;
     }
 
-    bool Load() {
+    bool Load(int tp_rank = 0) {
+        nds_config_path = ResolveNdsConfigPath(tp_rank);
+
         if (handle) return true;
 
         const char* env_path = std::getenv("NDS_LIBRARY_PATH");
         std::string lib_path = env_path ? env_path : "libndskv.so";
-
-        const char* env_config = std::getenv("MC_NDS_CONFIG");
-        nds_config_path = env_config ? env_config : "nds_config.conf";
 
         handle = dlopen(lib_path.c_str(), RTLD_NOW | RTLD_GLOBAL);
         if (!handle) {
@@ -154,7 +216,7 @@ tl::expected<void, ErrorCode> KVStorageBackend::Init(void* nds_mem_addr,
         return {};
     }
 
-    bool nds_loaded = NDSLoader::Instance().Load();
+    bool nds_loaded = NDSLoader::Instance().Load(tp_rank_);
     if (!nds_loaded) {
         LOG(ERROR) << "KVStorageBackend requires NDS library but failed to load";
         return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
@@ -239,7 +301,7 @@ tl::expected<void, ErrorCode> KVStorageBackend::InitMulti(
         }
     }
 
-    bool nds_loaded = NDSLoader::Instance().Load();
+    bool nds_loaded = NDSLoader::Instance().Load(tp_rank_);
     if (!nds_loaded) {
         LOG(ERROR) << "KVStorageBackend requires NDS library but failed to load";
         return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
