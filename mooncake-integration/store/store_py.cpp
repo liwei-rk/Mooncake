@@ -282,6 +282,7 @@ class MooncakeStorePyWrapper {
             return -1;
         }
         store_->client_->SetTpRank(tp_rank);
+        return 0;
     }
 
     std::string get_tp_key_name(const std::string &base_key, int rank) {
@@ -1503,9 +1504,9 @@ PYBIND11_MODULE(store, m) {
              "2 if master unreachable.")
         .def("set_tp_rank", &MooncakeStorePyWrapper::set_tp_rank,
              py::arg("tp_rank"),
-            "Set the tensor parallel rank. When OD KV storage is enabled, the "
-            "rank is forwarded to the KV storage backend. Returns on "
-            "success, -1 if the client is not initialized")
+             "Set the tensor parallel rank. When OD KV storage is enabled, the "
+             "rank is forwarded to the KV storage backend. Returns on "
+             "success, -1 if the client is not initialized")
         .def("get_size",
              [](MooncakeStorePyWrapper &self, const std::string &key) {
                  py::gil_scoped_release release;

@@ -34,6 +34,14 @@ std::string Trim(const std::string& str) {
     return str.substr(begin, end - begin + 1);
 }
 
+// Resolve the NDS config path for the given tensor parallel rank.
+//
+// MC_NDS_CONFIG supports two formats:
+//   - a plain path (legacy), e.g. "nds_config.conf";
+//   - a comma-separated mapping of tp_rank=path entries, e.g.
+//     "0=nds_config_0.conf,1=nds_config_1.conf".
+// When the variable is empty, malformed, or has no entry for tp_rank, fall
+// back to the default "nds_config.conf".
 std::string ResolveNdsConfigPath(int tp_rank) {
     constexpr const char* kDefaultConfigPath = "nds_config.conf";
 
@@ -55,7 +63,7 @@ std::string ResolveNdsConfigPath(int tp_rank) {
         size_t comma = raw.find(',', pos);
         std::string entry =
             raw.substr(pos, comma == std::string::npos ? std::string::npos
-                                                       : comman - pos);
+                                                       : comma - pos);
         pos = (comma == std::string::npos) ? raw.size() + 1 : comma + 1;
 
         entry = Trim(entry);
@@ -73,6 +81,14 @@ std::string ResolveNdsConfigPath(int tp_rank) {
         if (rank_str.empty() || path.empty()) {
             LOG(WARNING) << "Ignoring malformed MC_NDS_CONFIG entry: '" << entry
                          << "'";
+            continue;
+        }
+
+        char* parse_end = nullptr;
+        long rank = std::strtol(rank_str.c_str(), &parse_end, 10);
+        if (parse_end == rank_str.c_str() || *parse_end != '\0') {
+            LOG(WARNING) << "Ignoring MC_NDS_CONFIG entry with invalid tp_rank: '"
+                         << entry << "'";
             continue;
         }
 
