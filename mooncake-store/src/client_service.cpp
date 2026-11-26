@@ -2539,6 +2539,13 @@ tl::expected<void, ErrorCode> Client::MarkTaskToComplete(
     return master_client_.MarkTaskToComplete(update_request);
 }
 
+void Client::SetTpRank(int tp_rank) {
+    tp_rank_ = tp_rank;
+    if (use_od_ && kv_storage_backend_) {
+        kv_storage_backend_->setTpRank(tp_rank_);
+    }
+}
+
 void Client::PrepareStorageBackend(const std::string& storage_root_dir,
                                    const std::string& fsdir,
                                    bool enable_eviction, uint64_t quota_bytes) {
@@ -2546,6 +2553,7 @@ void Client::PrepareStorageBackend(const std::string& storage_root_dir,
     if (use_od_) {
         kv_storage_backend_ = std::make_shared<KVStorageBackend>();
         kv_storage_backend_->setNsid(nsid_);
+        kv_storage_backend_->setTpRank(tp_rank_);
         LOG(INFO) << "NDS nsid set from master config: " << nsid_;
     } else {
 #ifdef USE_3FS

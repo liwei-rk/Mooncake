@@ -55,11 +55,15 @@ class KVStorageBackend {
     void setNsid(uint32_t nsid) { nsid_ = nsid; }
     uint32_t nsid() const { return nsid_; }
 
+    void setTpRank(int tp_rank) { tp_rank_ = tp_rank; }
+    int tp_rank() const { return tp_rank_; }
+
     private:
     bool owns_nds_memory_{false};
     void* nds_mem_addr_ = nullptr;
     uint64_t nds_mem_size_ = 0;
     uint32_t nsid_{0};
+    int tp_rank_{0};
     std::atomic<bool> initialized_{false};
 };
 

@@ -482,6 +482,14 @@ class Client {
     bool is_ping_healthy() const { return last_ping_success_.load(); }
 
     /**
+     * @brief Set the tensor parallel rank.
+     *
+     * When the OD KV storage backend is in use, the rank is forwarded to the
+     * backend; otherwise it is only recorded for later backend creation.
+     */
+    void SetTpRank(int tp_rank);
+
+    /**
      * @brief Get current frequency admission count for a key.
      * @return estimated count, or 0 if admission sketch is disabled.
      */
@@ -660,6 +668,7 @@ class Client {
     std::shared_ptr<KVStorageBackend> kv_storage_backend_;
     bool use_od_{false};
     uint32_t nsid_{0};
+    int tp_rank_{0};
     
     
 

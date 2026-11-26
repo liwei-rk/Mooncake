@@ -276,6 +276,14 @@ class MooncakeStorePyWrapper {
         return store_->health_check();
     }
 
+    int set_tp_rank(int tp_rank) {
+        if (!is_client_initialized() || use_dummy_client_) {
+            LOG(ERROR) << "Client is not initialized";
+            return -1;
+        }
+        store_->client_->SetTpRank(tp_rank);
+    }
+
     std::string get_tp_key_name(const std::string &base_key, int rank) {
         return base_key + "_tp_" + std::to_string(rank);
     }
@@ -1493,6 +1501,11 @@ PYBIND11_MODULE(store, m) {
              "Health check for store connectivity. "
              "Returns 0 if healthy, 1 if not initialized/closed, "
              "2 if master unreachable.")
+        .def("set_tp_rank", &MooncakeStorePyWrapper::set_tp_rank,
+             py::arg("tp_rank"),
+            "Set the tensor parallel rank. When OD KV storage is enabled, the "
+            "rank is forwarded to the KV storage backend. Returns on "
+            "success, -1 if the client is not initialized")
         .def("get_size",
              [](MooncakeStorePyWrapper &self, const std::string &key) {
                  py::gil_scoped_release release;
