@@ -191,7 +191,8 @@ struct NDSLoader {
             return false;
         }
 
-        LOG(INFO) << "Successfully loaded libndskv.so";
+        LOG(INFO) << "Successfully loaded libndskv.so, tp_rank=" << tp_rank
+                  << ", nds_config_path=" << nds_config_path;
         return true;
     }
 
