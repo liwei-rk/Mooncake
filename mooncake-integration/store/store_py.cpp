@@ -1505,8 +1505,8 @@ PYBIND11_MODULE(store, m) {
         .def("set_tp_rank", &MooncakeStorePyWrapper::set_tp_rank,
              py::arg("tp_rank"),
              "Set the tensor parallel rank. When OD KV storage is enabled, the "
-             "rank is forwarded to the KV storage backend. Returns on "
-             "success, -1 if the client is not initialized")
+             "rank is forwarded to the KV storage backend. Returns 0 on "
+             "success, -1 if the client is not initialized.")
         .def("get_size",
              [](MooncakeStorePyWrapper &self, const std::string &key) {
                  py::gil_scoped_release release;
