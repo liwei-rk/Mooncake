@@ -491,6 +491,140 @@ TEST_F(MasterServiceSSDTest, EvictDiskReplica_InvalidReplicaTypeReturnsError) {
     EXPECT_EQ(evict_result.error(), ErrorCode::INVALID_PARAMS);
 }
 
+TEST_F(MasterServiceSSDTest, DiskOnlyPutStartAllocatesOnlyDiskReplica) {
+    // No memory segment is mounted on purpose: disk-only puts must not
+    // require any memory segment.
+    auto service_ = CreateMasterServiceWithSSDFeat("/mnt/ssd");
+    UUID client_id = generate_uuid();
+
+    std::string key = "disk_only_key";
+    uint64_t slice_length = 1024;
+    ReplicateConfig config;
+    config.disk_only = true;
+    config.replica_num = 1;
+
+    auto put_start_result =
+        service_->PutStart(client_id, key, slice_length, config);
+    ASSERT_TRUE(put_start_result.has_value());
+    auto replicas = put_start_result.value();
+    ASSERT_EQ(1, replicas.size());
+    EXPECT_TRUE(replicas[0].is_disk_replica());
+    EXPECT_EQ(ReplicaStatus::PROCESSING, replicas[0].status);
+
+    // Not ready until PutEnd(DISK)
+    auto get_result = service_->GetReplicaList(key);
+    ASSERT_FALSE(get_result.has_value());
+    EXPECT_EQ(ErrorCode::REPLICA_IS_NOT_READY, get_result.error());
+
+    // No-op finalize of MEMORY must succeed and keep the disk replica
+    // PROCESSING.
+    EXPECT_TRUE(
+        service_->PutEnd(client_id, key, ReplicaType::MEMORY).has_value());
+    get_result = service_->GetReplicaList(key);
+    ASSERT_FALSE(get_result.has_value());
+
+    EXPECT_TRUE(
+        service_->PutEnd(client_id, key, ReplicaType::DISK).has_value());
+
+    get_result = service_->GetReplicaList(key);
+    ASSERT_TRUE(get_result.has_value());
+    ASSERT_EQ(1, get_result.value().replicas.size());
+    EXPECT_TRUE(get_result.value().replicas[0].is_disk_replica());
+    EXPECT_EQ(ReplicaStatus::COMPLETE, get_result.value().replicas[0].status);
+}
+
+TEST_F(MasterServiceSSDTest, DiskOnlyPutStartIgnoresReplicaNum) {
+    auto service_ = CreateMasterServiceWithSSDFeat("/mnt/ssd");
+    UUID client_id = generate_uuid();
+
+    // replica_num = 0 is allowed together with disk_only.
+    ReplicateConfig zero_config;
+    zero_config.disk_only = true;
+    zero_config.replica_num = 0;
+    auto zero_result =
+        service_->PutStart(client_id, "disk_only_zero", 1024, zero_config);
+    ASSERT_TRUE(zero_result.has_value());
+    EXPECT_EQ(1, zero_result.value().size());
+    EXPECT_TRUE(zero_result.value()[0].is_disk_replica());
+
+    // replica_num > 1 is ignored for disk-only puts: exactly one disk
+    // replica is allocated.
+    ReplicateConfig multi_config;
+    multi_config.disk_only = true;
+    multi_config.replica_num = 3;
+    auto multi_result =
+        service_->PutStart(client_id, "disk_only_multi", 1024, multi_config);
+    ASSERT_TRUE(multi_result.has_value());
+    EXPECT_EQ(1, multi_result.value().size());
+    EXPECT_TRUE(multi_result.value()[0].is_disk_replica());
+}
+
+TEST_F(MasterServiceSSDTest, DiskOnlyPutRevokeRemovesObject) {
+    auto service_ = CreateMasterServiceWithSSDFeat("/mnt/ssd");
+    UUID client_id = generate_uuid();
+
+    std::string key = "disk_only_revoke_key";
+    ReplicateConfig config;
+    config.disk_only = true;
+
+    ASSERT_TRUE(service_->PutStart(client_id, key, 1024, config).has_value());
+    EXPECT_TRUE(
+        service_->PutRevoke(client_id, key, ReplicaType::DISK).has_value());
+
+    auto get_result = service_->GetReplicaList(key);
+    EXPECT_FALSE(get_result.has_value());
+    EXPECT_EQ(ErrorCode::OBJECT_NOT_FOUND, get_result.error());
+}
+
+TEST_F(MasterServiceSSDTest, DiskOnlyPutStartFailsWhenDiskDisabled) {
+    // Master without root_fs_dir: disk replicas are disabled, disk_only
+    // must be rejected.
+    auto service_ = std::make_unique<MasterService>();
+    UUID client_id = generate_uuid();
+
+    ReplicateConfig config;
+    config.disk_only = true;
+
+    auto put_start_result =
+        service_->PutStart(client_id, "disk_only_disabled", 1024, config);
+    ASSERT_FALSE(put_start_result.has_value());
+    EXPECT_EQ(ErrorCode::INVALID_PARAMS, put_start_result.error());
+}
+
+TEST_F(MasterServiceSSDTest, DiskOnlyPutSucceedsWithMemorySegmentMounted) {
+    // Even with memory segments available, disk_only must skip memory
+    // allocation entirely.
+    auto service_ = CreateMasterServiceWithSSDFeat("/mnt/ssd");
+
+    constexpr size_t buffer = 0x300000000;
+    constexpr size_t size = 1024 * 1024 * 64;
+    Segment segment;
+    segment.id = generate_uuid();
+    segment.name = "test_segment";
+    segment.base = buffer;
+    segment.size = size;
+    segment.te_endpoint = segment.name;
+    UUID client_id = generate_uuid();
+    ASSERT_TRUE(service_->MountSegment(segment, client_id).has_value());
+
+    std::string key = "disk_only_with_segment";
+    ReplicateConfig config;
+    config.disk_only = true;
+
+    auto put_start_result = service_->PutStart(client_id, key, 1024, config);
+    ASSERT_TRUE(put_start_result.has_value());
+    auto replicas = put_start_result.value();
+    ASSERT_EQ(1, replicas.size());
+    EXPECT_TRUE(replicas[0].is_disk_replica());
+
+    EXPECT_TRUE(
+        service_->PutEnd(client_id, key, ReplicaType::DISK).has_value());
+    auto get_result = service_->GetReplicaList(key);
+    ASSERT_TRUE(get_result.has_value());
+    EXPECT_EQ(1, get_result.value().replicas.size());
+    EXPECT_TRUE(get_result.value().replicas[0].is_disk_replica());
+}
+
 }  // namespace mooncake::test
 
 int main(int argc, char** argv) {

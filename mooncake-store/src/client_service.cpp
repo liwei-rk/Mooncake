@@ -587,7 +587,7 @@ std::optional<std::shared_ptr<Client>> Client::Create(
                 << "Storage root directory is not set. persisting data is "
                    "disabled.";
             client->PrepareStorageBackend("", "", config.enable_disk_eviction,
-                                           config.quota_bytes);
+                                          config.quota_bytes);
         } else {
             size_t pos = config.fsdir.find_last_of('/');
             if (pos != std::string::npos) {
@@ -859,8 +859,9 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGetWhenPreferSameNode(
         if (!replica.is_memory_replica()) {
             LOG(ERROR) << "[BatchGetSameNode] key=" << key
                        << " selected_replica is NOT memory, type="
-                       << (replica.is_disk_replica() ? "DISK" :
-                           replica.is_local_disk_replica() ? "LOCAL_DISK" : "UNKNOWN")
+                       << (replica.is_disk_replica()         ? "DISK"
+                           : replica.is_local_disk_replica() ? "LOCAL_DISK"
+                                                             : "UNKNOWN")
                        << " -> INVALID_REPLICA";
             results[i] = tl::unexpected(ErrorCode::INVALID_REPLICA);
             continue;
@@ -871,11 +872,14 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGetWhenPreferSameNode(
                   << " selected=MEMORY";
         for (size_t r = 0; r < replica_list.size(); ++r) {
             std::string type_str = "UNKNOWN";
-            if (replica_list[r].is_memory_replica()) type_str = "MEMORY";
-            else if (replica_list[r].is_disk_replica()) type_str = "DISK";
-            else if (replica_list[r].is_local_disk_replica()) type_str = "LOCAL_DISK";
-            LOG(INFO) << "[BatchGetSameNode] key=" << key
-                      << " replica[" << r << "] type=" << type_str
+            if (replica_list[r].is_memory_replica())
+                type_str = "MEMORY";
+            else if (replica_list[r].is_disk_replica())
+                type_str = "DISK";
+            else if (replica_list[r].is_local_disk_replica())
+                type_str = "LOCAL_DISK";
+            LOG(INFO) << "[BatchGetSameNode] key=" << key << " replica[" << r
+                      << "] type=" << type_str
                       << " status=" << static_cast<int>(replica_list[r].status);
         }
 
@@ -959,7 +963,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGetWhenPreferSameNode(
     }
     return results;
 }
-    
+
 std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
     const std::vector<std::string>& object_keys,
     const std::vector<QueryResult>& query_results,
@@ -988,8 +992,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
     }
 
     LOG(INFO) << "[BatchGet] prefer_same_node=" << prefer_same_node
-              << " use_od=" << use_od_
-              << " keys_count=" << object_keys.size();
+              << " use_od=" << use_od_ << " keys_count=" << object_keys.size();
 
     if (prefer_same_node) {
         return BatchGetWhenPreferSameNode(object_keys, query_results, slices);
@@ -1019,9 +1022,12 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
             for (size_t r = 0; r < query_result.replicas.size(); ++r) {
                 const auto& desc = query_result.replicas[r];
                 std::string type_str = "UNKNOWN";
-                if (desc.is_memory_replica()) type_str = "MEMORY";
-                else if (desc.is_disk_replica()) type_str = "DISK";
-                else if (desc.is_local_disk_replica()) type_str = "LOCAL_DISK";
+                if (desc.is_memory_replica())
+                    type_str = "MEMORY";
+                else if (desc.is_disk_replica())
+                    type_str = "DISK";
+                else if (desc.is_local_disk_replica())
+                    type_str = "LOCAL_DISK";
                 // LOG(INFO) << "[BatchGet-Debug] key=" << key
                 //           << " replica[" << r << "] type=" << type_str
                 //           << " status=" << static_cast<int>(desc.status);
@@ -1035,7 +1041,8 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
             }
 
             Replica::Descriptor replica;
-            ErrorCode err = FindFirstCompleteReplica(query_result.replicas, replica);
+            ErrorCode err =
+                FindFirstCompleteReplica(query_result.replicas, replica);
             if (err != ErrorCode::OK) {
                 if (err == ErrorCode::INVALID_REPLICA) {
                     LOG(ERROR) << "no_supported_replicas_found key=" << key;
@@ -1045,9 +1052,12 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
             }
 
             std::string selected_type = "UNKNOWN";
-            if (replica.is_memory_replica()) selected_type = "MEMORY";
-            else if (replica.is_disk_replica()) selected_type = "DISK";
-            else if (replica.is_local_disk_replica()) selected_type = "LOCAL_DISK";
+            if (replica.is_memory_replica())
+                selected_type = "MEMORY";
+            else if (replica.is_disk_replica())
+                selected_type = "DISK";
+            else if (replica.is_local_disk_replica())
+                selected_type = "LOCAL_DISK";
             // LOG(INFO) << "[BatchGet-Debug] key=" << key
             //           << " selected_replica=" << selected_type;
 
@@ -1070,7 +1080,8 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
             }
         }
 
-        // LOG(INFO) << "[BatchGet-Debug] memory_keys=" << memory_replicas.size()
+        // LOG(INFO) << "[BatchGet-Debug] memory_keys=" <<
+        // memory_replicas.size()
         //           << " disk_keys=" << disk_replicas.size();
 
         std::optional<TransferFuture> mem_future;
@@ -1084,9 +1095,11 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
                            << memory_replicas.size() << " keys";
                 for (size_t j = 0; j < memory_indices.size(); ++j) {
                     if (hot_cache_ && memory_cache_used[j]) {
-                        hot_cache_->ReleaseHotKey(object_keys[memory_indices[j]]);
+                        hot_cache_->ReleaseHotKey(
+                            object_keys[memory_indices[j]]);
                     }
-                    results[memory_indices[j]] = tl::unexpected(ErrorCode::TRANSFER_FAIL);
+                    results[memory_indices[j]] =
+                        tl::unexpected(ErrorCode::TRANSFER_FAIL);
                 }
             }
         }
@@ -1109,13 +1122,14 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
                 LOG(ERROR) << "Memory batch transfer failed";
                 for (size_t j = 0; j < memory_indices.size(); ++j) {
                     if (hot_cache_ && memory_cache_used[j]) {
-                        hot_cache_->ReleaseHotKey(object_keys[memory_indices[j]]);
+                        hot_cache_->ReleaseHotKey(
+                            object_keys[memory_indices[j]]);
                     }
                     results[memory_indices[j]] = tl::unexpected(mem_result);
                 }
             } else {
                 VLOG(1) << "Memory batch transfer succeeded for "
-                         << memory_replicas.size() << " keys";
+                        << memory_replicas.size() << " keys";
                 for (size_t j = 0; j < memory_indices.size(); ++j) {
                     auto idx = memory_indices[j];
                     results[idx] = {};
@@ -1124,9 +1138,9 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
                     }
                     if (hot_cache_ && j < memory_replicas.size() &&
                         j < memory_slices.size() &&
-                        ShouldAdmitToHotCache(object_keys[idx], memory_cache_used[j])) {
-                        ProcessSlicesAsync(object_keys[idx],
-                                           memory_slices[j],
+                        ShouldAdmitToHotCache(object_keys[idx],
+                                              memory_cache_used[j])) {
+                        ProcessSlicesAsync(object_keys[idx], memory_slices[j],
                                            memory_replicas[j]);
                     }
                 }
@@ -1142,7 +1156,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
                 }
             } else {
                 VLOG(1) << "Disk (NDS) batch transfer succeeded for "
-                         << disk_replicas.size() << " keys";
+                        << disk_replicas.size() << " keys";
                 for (size_t idx : disk_indices) {
                     results[idx] = {};
                 }
@@ -1170,7 +1184,8 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
             }
 
             Replica::Descriptor replica;
-            ErrorCode err = FindFirstCompleteReplica(query_result.replicas, replica);
+            ErrorCode err =
+                FindFirstCompleteReplica(query_result.replicas, replica);
             if (err != ErrorCode::OK) {
                 if (err == ErrorCode::INVALID_REPLICA) {
                     LOG(ERROR) << "no_complete_replicas_found key=" << key;
@@ -1187,8 +1202,8 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
                 }
             }
 
-            auto future = transfer_submitter_->submit(replica, slices_it->second,
-                                                       TransferRequest::READ);
+            auto future = transfer_submitter_->submit(
+                replica, slices_it->second, TransferRequest::READ);
             if (!future) {
                 if (hot_cache_ && cache_used) {
                     hot_cache_->ReleaseHotKey(key);
@@ -1220,7 +1235,8 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
                     auto slices_it = slices.find(key);
                     if (slices_it != slices.end() &&
                         ShouldAdmitToHotCache(key, cache_used)) {
-                        ProcessSlicesAsync(key, slices_it->second, stored_replica);
+                        ProcessSlicesAsync(key, slices_it->second,
+                                           stored_replica);
                     }
                 }
             }
@@ -1281,6 +1297,12 @@ bool Client::RedirectToHotCache(const std::string& key,
 tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
                                           std::vector<Slice>& slices,
                                           const ReplicateConfig& config) {
+    if (config.disk_only && !use_od_ && !storage_backend_) {
+        LOG(ERROR) << "disk_only put requires NDS or storage backend, key="
+                   << key;
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+
     // Prepare slice lengths
     std::vector<size_t> slice_lengths;
     for (size_t i = 0; i < slices.size(); ++i) {
@@ -1288,7 +1310,7 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
     }
 
     ReplicateConfig client_cfg = config;
-    if (protocol_ == "cxl") {
+    if (protocol_ == "cxl" && !config.disk_only) {
         client_cfg.preferred_segment = local_hostname_;
     }
 
@@ -1312,23 +1334,39 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
 
     auto t0_put = std::chrono::steady_clock::now();
 
+    bool has_memory_replica = false;
+    for (const auto& replica : start_result.value()) {
+        if (replica.is_memory_replica()) {
+            has_memory_replica = true;
+            break;
+        }
+    }
+
     if (use_od_) {
         for (auto it = start_result.value().rbegin();
              it != start_result.value().rend(); ++it) {
             if (it->is_disk_replica()) {
                 auto disk_descriptor = it->get_disk_descriptor();
-                auto nds_result = kv_storage_backend_->StoreObjects({key}, {{slices}});
+                auto nds_result =
+                    kv_storage_backend_->StoreObjects({key}, {{slices}});
                 if (!nds_result) {
                     LOG(ERROR) << "NDS StoreObjects failed for key: " << key;
-                    auto revoke_result = master_client_.PutRevoke(key, ReplicaType::DISK);
+                    auto revoke_result =
+                        master_client_.PutRevoke(key, ReplicaType::DISK);
                     if (!revoke_result) {
-                        LOG(ERROR) << "Failed to revoke put operation for key: " << key;
+                        LOG(ERROR) << "Failed to revoke put operation for key: "
+                                   << key;
                     }
                     return tl::unexpected(nds_result.error());
                 }
                 auto end_result = master_client_.BatchPutEndDisk({key});
                 if (!end_result[0]) {
                     LOG(ERROR) << "BatchPutEndDisk failed for key " << key;
+                    if (!has_memory_replica) {
+                        // Disk-only put has no fallback replica: fail the
+                        // put instead of leaving no complete replica.
+                        return tl::unexpected(end_result[0].error());
+                    }
                 }
                 break;
             }
@@ -1348,7 +1386,8 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
         if (replica.is_memory_replica()) {
             ErrorCode transfer_err = TransferWrite(replica, slices);
             if (transfer_err != ErrorCode::OK) {
-                auto revoke_result = master_client_.PutRevoke(key, ReplicaType::MEMORY);
+                auto revoke_result =
+                    master_client_.PutRevoke(key, ReplicaType::MEMORY);
                 if (!revoke_result) {
                     LOG(ERROR) << "Failed to revoke put operation";
                     return tl::unexpected(revoke_result.error());
@@ -1365,12 +1404,16 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
         metrics_->transfer_metric.put_latency_us.observe(us_put);
     }
 
-    // End put operation
-    auto end_result = master_client_.PutEnd(key, ReplicaType::MEMORY);
-    if (!end_result) {
-        ErrorCode err = end_result.error();
-        LOG(ERROR) << "Failed to end put operation: " << err;
-        return tl::unexpected(err);
+    // End put operation. Disk-only puts are finalized by the DISK write
+    // paths above (NDS: BatchPutEndDisk; file storage: async PutToLocalFile),
+    // so only finalize MEMORY replicas here.
+    if (has_memory_replica) {
+        auto end_result = master_client_.PutEnd(key, ReplicaType::MEMORY);
+        if (!end_result) {
+            ErrorCode err = end_result.error();
+            LOG(ERROR) << "Failed to end put operation: " << err;
+            return tl::unexpected(err);
+        }
     }
 
     return {};
@@ -1539,15 +1582,14 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
 
         if (!nds_keys.empty()) {
             nds_state = std::make_shared<NdsWriteOperationState>();
-            write_thread_pool_.enqueue(
-                [this, b_keys = std::move(nds_keys),
-                 b_slices = std::move(nds_slices),
-                 state = nds_state]() mutable {
-                    auto nds_result = kv_storage_backend_->StoreObjects(
-                        b_keys, b_slices);
-                    state->set_completed(
-                        nds_result ? ErrorCode::OK : nds_result.error());
-                });
+            write_thread_pool_.enqueue([this, b_keys = std::move(nds_keys),
+                                        b_slices = std::move(nds_slices),
+                                        state = nds_state]() mutable {
+                auto nds_result =
+                    kv_storage_backend_->StoreObjects(b_keys, b_slices);
+                state->set_completed(nds_result ? ErrorCode::OK
+                                                : nds_result.error());
+            });
         }
     }
 
@@ -1587,9 +1629,8 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                     replica, op.slices, TransferRequest::WRITE);
 
                 if (!submit_result) {
-                    failure_context =
-                        "Failed to submit transfer for replica " +
-                        std::to_string(replica_idx);
+                    failure_context = "Failed to submit transfer for replica " +
+                                      std::to_string(replica_idx);
                     all_transfers_submitted = false;
                     break;
                 }
@@ -1612,8 +1653,7 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                 op.pending_transfers.emplace_back(
                     TransferFuture(std::make_shared<EmptyOperationState>()));
             }
-            VLOG(1) << "Successfully submitted "
-                    << op.pending_transfers.size()
+            VLOG(1) << "Successfully submitted " << op.pending_transfers.size()
                     << " transfers for key " << op.key;
         }
     }
@@ -1638,7 +1678,7 @@ void Client::WaitForTransfers(std::vector<PutOperation>& ops) {
         size_t failed_transfer_idx = 0;
 
         for (size_t i = 0; i < op.pending_transfers.size(); ++i) {
-ErrorCode transfer_result = op.pending_transfers[i].get();
+            ErrorCode transfer_result = op.pending_transfers[i].get();
             if (transfer_result != ErrorCode::OK) {
                 if (all_transfers_succeeded) {
                     // Record the first error for reporting
@@ -1707,7 +1747,8 @@ void Client::FinalizeBatchPut(std::vector<PutOperation>& ops) {
         auto end_responses = master_client_.BatchPutEnd(successful_keys);
         LOG(INFO) << "[FinalizeBatchPut] BatchPutEnd(MEMORY) RPC: "
                   << std::chrono::duration_cast<std::chrono::microseconds>(
-                         std::chrono::steady_clock::now() - t_bpe_start).count()
+                         std::chrono::steady_clock::now() - t_bpe_start)
+                         .count()
                   << " us for " << successful_keys.size() << " keys";
         if (end_responses.size() != successful_keys.size()) {
             LOG(ERROR) << "BatchPutEnd response size mismatch: expected "
@@ -1758,12 +1799,12 @@ void Client::FinalizeBatchPut(std::vector<PutOperation>& ops) {
         }
 
         if (!disk_keys.empty()) {
-            auto end_disk_responses =
-                master_client_.BatchPutEndDisk(disk_keys);
+            auto end_disk_responses = master_client_.BatchPutEndDisk(disk_keys);
             if (end_disk_responses.size() != disk_keys.size()) {
-                LOG(ERROR) << "BatchPutEndDisk response size mismatch: expected "
-                           << disk_keys.size() << ", got "
-                           << end_disk_responses.size();
+                LOG(ERROR)
+                    << "BatchPutEndDisk response size mismatch: expected "
+                    << disk_keys.size() << ", got "
+                    << end_disk_responses.size();
                 for (size_t idx : disk_op_indices) {
                     ops[idx].SetError(ErrorCode::RPC_FAIL,
                                       "BatchPutEndDisk response size mismatch");
@@ -1792,7 +1833,8 @@ void Client::FinalizeBatchPut(std::vector<PutOperation>& ops) {
         auto revoke_responses = master_client_.BatchPutRevoke(failed_keys);
         LOG(INFO) << "[FinalizeBatchPut] BatchPutRevoke(MEMORY+DISK) RPC: "
                   << std::chrono::duration_cast<std::chrono::microseconds>(
-                         std::chrono::steady_clock::now() - t_revoke_start).count()
+                         std::chrono::steady_clock::now() - t_revoke_start)
+                         .count()
                   << " us for " << failed_keys.size() << " keys";
         if (revoke_responses.size() != failed_keys.size()) {
             LOG(ERROR) << "BatchPutRevoke response size mismatch: expected "
@@ -1970,7 +2012,7 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
     std::vector<std::vector<Slice>>& batched_slices,
     const ReplicateConfig& config) {
     ReplicateConfig client_cfg = config;
-    if (protocol_ == "cxl") {
+    if (protocol_ == "cxl" && !config.disk_only) {
         client_cfg.preferred_segment = local_hostname_;
     }
     std::vector<PutOperation> ops = CreatePutOperations(keys, batched_slices);
@@ -1981,8 +2023,19 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
             return std::vector<tl::expected<void, ErrorCode>>(
                 keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
         }
+        if (client_cfg.disk_only) {
+            LOG(ERROR) << "prefer_alloc_in_same_node is not supported with "
+                          "disk_only";
+            return std::vector<tl::expected<void, ErrorCode>>(
+                keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
+        }
         StartBatchPut(ops, client_cfg);
         return BatchPutWhenPreferSameNode(ops);
+    }
+    if (client_cfg.disk_only && !use_od_ && !storage_backend_) {
+        LOG(ERROR) << "disk_only batch put requires NDS or storage backend";
+        return std::vector<tl::expected<void, ErrorCode>>(
+            keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
     }
 
     StartBatchPut(ops, client_cfg);
@@ -1991,15 +2044,19 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
     auto t_bp_submit = std::chrono::steady_clock::now();
     LOG(INFO) << "[BatchPut] SubmitTransfers: "
               << std::chrono::duration_cast<std::chrono::microseconds>(
-                     t_bp_submit - t_bp_t0).count() << " us";
+                     t_bp_submit - t_bp_t0)
+                     .count()
+              << " us";
     WaitForTransfers(ops);
     auto t_bp_wait = std::chrono::steady_clock::now();
     LOG(INFO) << "[BatchPut] WaitForTransfers: "
               << std::chrono::duration_cast<std::chrono::microseconds>(
-                     t_bp_wait - t_bp_submit).count() << " us";
+                     t_bp_wait - t_bp_submit)
+                     .count()
+              << " us";
 
-    auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-                  t_bp_wait - t_bp_t0)
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(t_bp_wait -
+                                                                    t_bp_t0)
                   .count();
     if (metrics_) {
         metrics_->transfer_metric.batch_put_latency_us.observe(us);
@@ -2009,10 +2066,13 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
     auto t_bp_finalize = std::chrono::steady_clock::now();
     LOG(INFO) << "[BatchPut] FinalizeBatchPut: "
               << std::chrono::duration_cast<std::chrono::microseconds>(
-                     t_bp_finalize - t_bp_wait).count() << " us";
+                     t_bp_finalize - t_bp_wait)
+                     .count()
+              << " us";
     LOG(INFO) << "[BatchPut] TOTAL: "
               << std::chrono::duration_cast<std::chrono::microseconds>(
-                     t_bp_finalize - t_bp_t0).count()
+                     t_bp_finalize - t_bp_t0)
+                     .count()
               << " us for " << keys.size() << " keys";
 
     return CollectResults(ops);
@@ -2202,10 +2262,12 @@ tl::expected<void, ErrorCode> Client::RegisterLocalMemory(
             addr, length, location, remote_accessible, update_metadata) != 0) {
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
-    if (use_od_ && kv_storage_backend_ && !kv_storage_backend_->isInitialized()) {
+    if (use_od_ && kv_storage_backend_ &&
+        !kv_storage_backend_->isInitialized()) {
         auto init_result = kv_storage_backend_->Init(addr, length);
         if (!init_result) {
-            LOG(ERROR) << "Failed to initialize KVStorageBackend in RegisterLocalMemory: "
+            LOG(ERROR) << "Failed to initialize KVStorageBackend in "
+                          "RegisterLocalMemory: "
                        << init_result.error();
         }
     }
@@ -2218,15 +2280,15 @@ tl::expected<void, ErrorCode> Client::unregisterLocalMemory(
         0) {
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
-    if (use_od_ && kv_storage_backend_ && kv_storage_backend_->isInitialized()) {
+    if (use_od_ && kv_storage_backend_ &&
+        kv_storage_backend_->isInitialized()) {
         kv_storage_backend_->CleanupNDS();
     }
     return {};
 }
 
 tl::expected<void, ErrorCode> Client::RegisterLocalMemoryBatch(
-    const std::vector<BufferEntry>& buffer_list,
-    const std::string& location) {
+    const std::vector<BufferEntry>& buffer_list, const std::string& location) {
     if (buffer_list.empty()) {
         LOG(ERROR) << "buffer_list is empty";
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
@@ -2241,10 +2303,11 @@ tl::expected<void, ErrorCode> Client::RegisterLocalMemoryBatch(
         }
     }
     if (this->transfer_engine_->registerLocalMemoryBatch(buffer_list,
-                                                          location) != 0) {
+                                                         location) != 0) {
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
-    if (use_od_ && kv_storage_backend_ && !kv_storage_backend_->isInitialized()) {
+    if (use_od_ && kv_storage_backend_ &&
+        !kv_storage_backend_->isInitialized()) {
         std::vector<void*> nds_addrs;
         std::vector<uint64_t> nds_sizes;
         nds_addrs.reserve(buffer_list.size());
@@ -2272,7 +2335,8 @@ tl::expected<void, ErrorCode> Client::unregisterLocalMemoryBatch(
     if (this->transfer_engine_->unregisterLocalMemoryBatch(addr_list) != 0) {
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
-    if (use_od_ && kv_storage_backend_ && kv_storage_backend_->isInitialized()) {
+    if (use_od_ && kv_storage_backend_ &&
+        kv_storage_backend_->isInitialized()) {
         kv_storage_backend_->CleanupNDS();
     }
     return {};
@@ -2569,20 +2633,22 @@ void Client::PrepareStorageBackend(const std::string& storage_root_dir,
         storage_backend_->use_uring_ =
             (use_uring_str == "true" || use_uring_str == "1");
         if (storage_backend_->use_uring_) {
-            LOG(INFO) << "StorageBackend: io_uring + O_DIRECT enabled for reads";
+            LOG(INFO)
+                << "StorageBackend: io_uring + O_DIRECT enabled for reads";
         }
         auto init_result = storage_backend_->Init(quota_bytes);
         if (!init_result) {
             LOG(ERROR) << "Failed to initialize StorageBackend. Error: "
-                       << init_result.error() << ". The backend will be unusable.";
+                       << init_result.error()
+                       << ". The backend will be unusable.";
             storage_backend_.reset();
         }
     }
 }
 
 void Client::PutToLocalFile(const std::string& key,
-                             const std::vector<Slice>& slices,
-                             const DiskDescriptor& disk_descriptor) {
+                            const std::vector<Slice>& slices,
+                            const DiskDescriptor& disk_descriptor) {
     if (!storage_backend_) return;
 
     size_t total_size = 0;

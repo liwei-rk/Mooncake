@@ -90,6 +90,10 @@ struct ReplicateConfig {
     std::string preferred_segment{};  // Deprecated: Single preferred segment
                                       // for backward compatibility
     bool prefer_alloc_in_same_node{false};
+    // Disk-only put: allocate only a DISK replica and skip memory replicas.
+    // Requires the master to have disk replica enabled (root_fs_dir or
+    // use_od). replica_num and preferred_segments are ignored.
+    bool disk_only{false};
 
     friend std::ostream& operator<<(std::ostream& os,
                                     const ReplicateConfig& config) noexcept {
@@ -107,7 +111,8 @@ struct ReplicateConfig {
                << config.preferred_segment;
         }
         os << ", prefer_alloc_in_same_node: "
-           << config.prefer_alloc_in_same_node << " }";
+           << config.prefer_alloc_in_same_node
+           << ", disk_only: " << config.disk_only << " }";
         return os;
     }
 };

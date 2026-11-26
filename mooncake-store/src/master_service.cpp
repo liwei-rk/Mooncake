@@ -743,16 +743,24 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
                              const uint64_t slice_length,
                              const ReplicateConfig& config)
     -> tl::expected<std::vector<Replica::Descriptor>, ErrorCode> {
-    if (config.replica_num == 0 || key.empty() || slice_length == 0) {
+    if ((!config.disk_only && config.replica_num == 0) || key.empty() ||
+        slice_length == 0) {
         LOG(ERROR) << "key=" << key << ", replica_num=" << config.replica_num
                    << ", slice_length=" << slice_length
                    << ", key_size=" << key.size() << ", error=invalid_params";
         return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
 
+    if (config.disk_only && !use_disk_replica_) {
+        LOG(ERROR) << "key=" << key
+                   << ", error=disk_only_but_disk_replica_disabled";
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
+
     // Validate slice lengths
     uint64_t total_length = 0;
-    if ((memory_allocator_type_ == BufferAllocatorType::CACHELIB) &&
+    if (!config.disk_only &&
+        (memory_allocator_type_ == BufferAllocatorType::CACHELIB) &&
         (slice_length > kMaxSliceSize)) {
         LOG(ERROR) << "key=" << key << ", slice_length=" << slice_length
                    << ", max_size=" << kMaxSliceSize
@@ -795,7 +803,7 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
 
     // Allocate replicas
     std::vector<Replica> replicas;
-    {
+    if (!config.disk_only) {
         ScopedAllocatorAccess allocator_access =
             segment_manager_.getAllocatorAccess();
         const auto& allocator_manager = allocator_access.getAllocatorManager();
@@ -833,12 +841,12 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
                                   ReplicaStatus::PROCESSING);
         } else {
             // NDS 模式没有文件系统路径，但读路径（transfer_task.cpp）靠
-            // ExtractKeyFromPath(file_path) 取末段还原 key，再 objectKeyToUint64
-            // 算 blockId。如果这里放空串，读端永远拿到 hash("") 读同一个
-            // 不存在的 slot（盘框报 1842，DISK 副本全部读失败）。
-            // 因此直接放 key 本身，保证读写两端 blockId 一致。
-            replicas.emplace_back(key, total_length,
-                                  ReplicaStatus::PROCESSING);
+            // ExtractKeyFromPath(file_path) 取末段还原 key，再
+            // objectKeyToUint64 算 blockId。如果这里放空串，读端永远拿到
+            // hash("") 读同一个 不存在的 slot（盘框报 1842，DISK
+            // 副本全部读失败）。 因此直接放 key 本身，保证读写两端 blockId
+            // 一致。
+            replicas.emplace_back(key, total_length, ReplicaStatus::PROCESSING);
         }
     }
 
@@ -877,7 +885,7 @@ auto MasterService::PutEnd(const UUID& client_id, const std::string& key,
         return tl::make_unexpected(ErrorCode::ILLEGAL_CLIENT);
     }
 
-    metadata.VisitReplicas(
+    size_t num_finalized = metadata.VisitReplicas(
         [replica_type](const Replica& replica) {
             return replica.type() == replica_type;
         },
@@ -903,10 +911,12 @@ auto MasterService::PutEnd(const UUID& client_id, const std::string& key,
         accessor.EraseFromProcessing();
     }
 
-    if (replica_type == ReplicaType::MEMORY) {
-        MasterMetricManager::instance().inc_mem_cache_nums();
-    } else if (replica_type == ReplicaType::DISK) {
-        MasterMetricManager::instance().inc_file_cache_nums();
+    if (num_finalized > 0) {
+        if (replica_type == ReplicaType::MEMORY) {
+            MasterMetricManager::instance().inc_mem_cache_nums();
+        } else if (replica_type == ReplicaType::DISK) {
+            MasterMetricManager::instance().inc_file_cache_nums();
+        }
     }
     // 1. Set lease timeout to now, indicating that the object has no lease
     // at beginning. 2. If this object has soft pin enabled, set it to be soft
@@ -1791,8 +1801,8 @@ MasterService::GetStorageConfig() const {
         LOG(INFO)
             << "Storage root directory or cluster ID is not set. persisting "
                "data is disabled.";
-        return GetStorageConfigResponse("", enable_disk_eviction_,
-                                        quota_bytes_, use_od_, nsid_);
+        return GetStorageConfigResponse("", enable_disk_eviction_, quota_bytes_,
+                                        use_od_, nsid_);
     }
     std::string fsdir = root_fs_dir_ + "/" + cluster_id_;
     return GetStorageConfigResponse(fsdir, enable_disk_eviction_, quota_bytes_,
