@@ -19,6 +19,12 @@ typedef int32_t (*NDS_batchGet_fn)(const uint64_t*, uint8_t**,
                                    const size_t*, const size_t*, const uint32_t*, size_t);
 typedef int32_t (*NDS_batchPut_fn)(const uint64_t*, uint8_t**,
                                    const size_t*, const size_t*, const uint32_t*, size_t);
+typedef int32_t (*NDS_batchGetSegs_fn)(const uint64_t*, size_t,
+                                       const uint32_t *, uint8_t**, const size_t*,
+                                       const uint32_t*);
+typedef int32_t (*NDS_batchPutSegs_fn)(const uint64_t*, size_t,
+                                       const uint32_t *, uint8_t**, const size_t*,
+                                       const uint32_t*);
 
 struct NDSLoader {
     void* handle = nullptr;
@@ -29,6 +35,8 @@ struct NDSLoader {
     NDS_put_fn put = nullptr;
     NDS_batchGet_fn batchGet = nullptr;
     NDS_batchPut_fn batchPut = nullptr;
+    NDS_batchGetSegs_fn batchGetSegs = nullptr;
+    NDS_batchPutSegs_fn batchPutSegs = nullptr;
     bool nds_initialized = false;
     void* nds_mem_addr = nullptr;
     uint64_t nds_mem_size = 0;
@@ -96,13 +104,25 @@ struct NDSLoader {
         dlsym_error = dlerror();
         if (dlsym_error) { LOG(ERROR) << "dlsym 'c_batchPut' failed: " << dlsym_error; }
 
-        if (!init || !get || !put || !batchGet || !batchPut) {
+        dlerror();
+        batchGetSegs = (NDS_batchGetSegs_fn)dlsym(handle, "c_batchGetSegs");
+        dlsym_error = dlerror();
+        if (dlsym_error) { LOG(ERROR) << "dlsym 'c_batchGetSegs' failed: " << dlsym_error; }
+
+        dlerror();
+        batchPutSegs = (NDS_batchPutSegs_fn)dlsym(handle, "c_batchPutSegs");
+        dlsym_error = dlerror();
+        if (dlsym_error) { LOG(ERROR) << "dlsym 'c_batchPutSegs' failed: " << dlsym_error; }
+
+        if (!init || !get || !put || !batchGet || !batchPut || !batchGetSegs || !batchPutSegs) {
             LOG(ERROR) << "Failed to load required NDS functions"
                        << " (init=" << (init ? "ok" : "MISSING")
                        << " get=" << (get ? "ok" : "MISSING")
                        << " put=" << (put ? "ok" : "MISSING")
                        << " batchGet=" << (batchGet ? "ok" : "MISSING")
                        << " batchPut=" << (batchPut ? "ok" : "MISSING")
+                       << " batchGetSegs=" << (batchGetSegs ? "ok" : "MISSING")
+                       << " batchPutSegs=" << (batchPutSegs ? "ok" : "MISSING")
                        << ")";
             dlclose(handle);
             handle = nullptr;
@@ -289,50 +309,29 @@ tl::expected<std::vector<std::string>, ErrorCode> KVStorageBackend::StoreObjects
     const std::vector<std::vector<Slice>>& batched_slices) {
     std::vector<uint64_t> blockIds;
     std::vector<uint8_t*> blockAddrs;
-    std::vector<size_t> nds_offsets;
     std::vector<size_t> nds_lengths;
+    std::vector<uint32_t> seg_counts;
 
     for (size_t i = 0; i < keys.size(); ++i) {
         const auto& slices = batched_slices[i];
         std::string key = ExtractKeyFromPath(keys[i]);
         uint64_t blockId = objectKeyToUint64(key);
         // LOG(WARNING) << "NDS StoreObjects: key=" << key << " blockId=" << blockId;
-        size_t total_slice_size = 0;
-        for (const auto& sl : slices) total_slice_size += sl.size;
-
-        bool contiguous = true;
-        for (size_t s = 1; s < slices.size(); ++s) {
-            if (reinterpret_cast<uint8_t*>(slices[s - 1].ptr) + slices[s - 1].size !=
-                reinterpret_cast<uint8_t*>(slices[s].ptr)) {
-                contiguous = false;
-                break;
-            }
-        }
-
-        if (!contiguous) {
-            LOG(ERROR) << "NDS StoreObjects: key=" << keys[i]
-                       << " slices are not contiguous in memory, "
-                       << "cannot perform zero-copy NDS write.";
-            for (size_t s = 0; s < slices.size(); ++s) {
-                LOG(ERROR) << "  slice[" << s << "]:"
-                           << " ptr=" << slices[s].ptr
-                           << " size=" << slices[s].size;
-            }
-            return tl::unexpected(ErrorCode::INVALID_PARAMS);
-        }
 
         blockIds.push_back(blockId);
-        blockAddrs.push_back(reinterpret_cast<uint8_t*>(slices[0].ptr));
-        nds_offsets.push_back(0);
-        nds_lengths.push_back(total_slice_size);
+
+        for (size_t j = 0; j < slices.size(); j++) {
+            blockAddrs.push_back(reinterpret_cast<uint8_t*>(slices[j].ptr));
+            nds_lengths.push_back(slices[j].size);
+        }
+        seg_counts.push_back(slices.size());
     }
 
     auto& loader = NDSLoader::Instance();
     std::vector<uint32_t> nsids(blockIds.size(), nsid_);
-    int32_t result = loader.batchPut(blockIds.data(),
-                                     blockAddrs.data(), nds_offsets.data(),
-                                     nds_lengths.data(), nsids.data(),
-                                     blockIds.size());
+    int32_t result = loader.batchPutSegs(blockIds.data(), blockIds.size(),
+                                         seg_counts.data(), blockAddrs.data(), nds_lengths.data(),
+                                         nsids.data());
     if (result != 0) {
         return tl::unexpected(ErrorCode::WRITE_FAIL);
     }
@@ -345,49 +344,27 @@ tl::expected<void, ErrorCode> KVStorageBackend::LoadObjects(
     const std::vector<std::vector<Slice>>& batched_slices) {
     std::vector<uint64_t> blockIds;
     std::vector<uint8_t*> blockAddrs;
-    std::vector<size_t> nds_offsets;
     std::vector<size_t> nds_lengths;
+    std::vector<uint32_t> seg_counts;
 
     for (size_t i = 0; i < keys.size(); ++i) {
         const auto& slices = batched_slices[i];
         uint64_t blockId = objectKeyToUint64(keys[i]);
         // LOG(WARNING) << "NDS LoadObjects: key=" << keys[i] << " blockId=" << blockId;
-        size_t total_slice_size = 0;
-        for (const auto& sl : slices) total_slice_size += sl.size;
-
-        bool contiguous = true;
-        for (size_t s = 1; s < slices.size(); ++s) {
-            if (reinterpret_cast<uint8_t*>(slices[s - 1].ptr) + slices[s - 1].size !=
-                reinterpret_cast<uint8_t*>(slices[s].ptr)) {
-                contiguous = false;
-                break;
-            }
-        }
-
-        if (!contiguous) {
-            LOG(ERROR) << "NDS LoadObjects: key=" << keys[i]
-                       << " slices are not contiguous in memory, "
-                       << "cannot perform zero-copy NDS read.";
-            for (size_t s = 0; s < slices.size(); ++s) {
-                LOG(ERROR) << "  slice[" << s << "]:"
-                           << " ptr=" << slices[s].ptr
-                           << " size=" << slices[s].size;
-            }
-            return tl::unexpected(ErrorCode::INVALID_PARAMS);
-        }
-
         blockIds.push_back(blockId);
-        blockAddrs.push_back(reinterpret_cast<uint8_t*>(slices[0].ptr));
-        nds_offsets.push_back(0);
-        nds_lengths.push_back(total_slice_size);
+
+        for (size_t j = 0; j < slices.size(); j++) {
+            blockAddrs.push_back(reinterpret_cast<uint8_t*>(slices[j].ptr));
+            nds_lengths.push_back(slices[j].size);
+        }
+        seg_counts.push_back(slices.size());
     }
 
     auto& loader = NDSLoader::Instance();
     std::vector<uint32_t> nsids(blockIds.size(), nsid_);
-    int32_t result = loader.batchGet(blockIds.data(),
-                                     blockAddrs.data(), nds_offsets.data(),
-                                     nds_lengths.data(), nsids.data(),
-                                     blockIds.size());
+    int32_t result = loader.batchGetSegs(blockIds.data(), blockIds.size(),
+                                         seg_counts.data(), blockAddrs.data(), nds_lengths.data(),
+                                         nsids.data());
     if (result != 0) {
         return tl::unexpected(ErrorCode::FILE_READ_FAIL);
     }
